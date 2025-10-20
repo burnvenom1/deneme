@@ -1,0 +1,14 @@
+{
+  "name": "hepsiburada-auto-system",
+  "version": "2.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "npm install"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "puppeteer": "^21.0.0",
+    "tor-ip-changer": "^1.0.0"
+  }
+}
