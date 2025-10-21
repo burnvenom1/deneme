@@ -16,7 +16,7 @@ def get_emails_alternative(email_address):
         
         # Farklı URL pattern'leri deneyelim
         url_patterns = [
-            f"https://tr.emailfake.com/mail{domain}/{username}",
+            f"https://tr.emailfake.com/{domain}/{username}",
             f"https://{domain}/inbox/{username}",
             f"https://emailfake.com/{domain}/{username}",
         ]
