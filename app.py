@@ -21,7 +21,7 @@ def get_emails_advanced(email_address):
         
         # Doğru URL formatı
         base_url = "https://tr.emailfake.com"
-        inbox_url = f"{base_url}/mail{domain}/{username}"
+        inbox_url = f"{base_url}/{domain}/{username}"
         
         logger.info(f"🌐 URL açılıyor: {inbox_url}")
         
