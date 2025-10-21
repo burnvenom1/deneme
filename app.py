@@ -4,9 +4,13 @@ import socketio
 import time
 import logging
 import threading
+import eventlet
+
+# Eventlet monkey patch (async için gerekli)
+eventlet.monkey_patch()
 
 app = Flask(__name__)
-sio = socketio.Client()
+sio = socketio.Client(logger=True, engineio_logger=True)
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +29,10 @@ def connect():
     # Email takibini BAŞLAT
     sio.emit("watch_for_my_email", "fedotiko@newdailys.com")
     logger.info("👂 fedotiko@newdailys.com TAKİBE ALINDI!")
+
+@sio.event
+def connect_error(data):
+    logger.error(f"❌ WebSocket bağlantı hatası: {data}")
 
 @sio.event
 def disconnect():
@@ -96,8 +104,9 @@ def start_websocket():
             # EMAILFAKE WebSocket'ine bağlan
             sio.connect(
                 "wss://tr.emailfake.com",
-                transports=['websocket'],
-                wait_timeout=10
+                transports=['websocket', 'polling'],
+                wait_timeout=10,
+                namespaces=['/']
             )
             
             logger.info("🚀 🚀 🚀 WEB SOCKET BAĞLANTISI BAŞARILI!")
@@ -106,8 +115,9 @@ def start_websocket():
         except Exception as e:
             logger.error(f"❌ Bağlantı hatası ({attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
-                logger.info(f"⏳ {retry_delay} saniye sonra yeniden deneniyor...")
-                time.sleep(retry_delay)
+                wait_time = retry_delay
+                logger.info(f"⏳ {wait_time} saniye sonra yeniden deneniyor...")
+                time.sleep(wait_time)
                 retry_delay = min(retry_delay * 1.5, 30)  # Exponential backoff
     else:
         logger.error("💥 MAXIMUM RETRY SAYISINA ULAŞILDI! Bağlantı kurulamadı.")
