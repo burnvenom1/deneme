@@ -1,5 +1,13 @@
-# emailfake-monitor/.gitignore
 __pycache__/
 *.pyc
 .env
 *.log
+.DS_Store
+.vscode/
+.idea/
+*.tmp
+*.temp
+instance/
+.coverage
+htmlcov/
+.pytest_cache/
