@@ -1,4 +1,4 @@
-# 📁 app.py - BASİT EMAILFAKE SCRAPER
+# 📁 app.py - DOĞRU URL FORMATI
 from flask import Flask, jsonify, request
 import requests
 import time
@@ -13,22 +13,16 @@ logger = logging.getLogger(__name__)
 # Mail depolama
 email_storage = {}
 
-def get_emails_simple(email_address):
-    """Basit ve etkili email scraper"""
+def get_emails_correct_url(email_address):
+    """Doğru URL formatı ile mailleri getir"""
     try:
-        # EmailFake URL yapısı
-        domain = email_address.split('@')[1]
+        username, domain = email_address.split('@')
         
-        if domain == "newdailys.com":
-            # NewDailys için özel URL
-            base_url = "https://tr.emailfake.com"
-            inbox_url = f"{base_url}/mail"
-        else:
-            # Diğer domain'ler
-            base_url = f"https://{domain}"
-            inbox_url = f"{base_url}/mail"
+        # DOĞRU URL FORMATI: https://tr.emailfake.com/mail{domain}/{username}
+        base_url = "https://tr.emailfake.com"
+        inbox_url = f"{base_url}/mail{domain}/{username}"
         
-        logger.info(f"🌐 Sayfa açılıyor: {inbox_url}")
+        logger.info(f"🌐 Doğru URL açılıyor: {inbox_url}")
         
         # Session oluştur
         session = requests.Session()
@@ -45,6 +39,7 @@ def get_emails_simple(email_address):
             return {
                 "status": "error",
                 "error": f"Sayfa yüklenemedi: {response.status_code}",
+                "url_used": inbox_url,
                 "emails": []
             }
         
@@ -53,21 +48,27 @@ def get_emails_simple(email_address):
         
         # Debug: Sayfa bilgilerini logla
         logger.info(f"📄 Sayfa başlığı: {soup.title.string if soup.title else 'Yok'}")
+        logger.info(f"📄 Sayfa URL: {inbox_url}")
         
         emails = []
         
-        # 1. Email adresini kontrol et
+        # 1. Aktif email adresini kontrol et
         email_elem = soup.find('span', id='email_ch_text')
         if email_elem:
             current_email = email_elem.get_text(strip=True)
             logger.info(f"📧 Aktif email: {current_email}")
         
-        # 2. Tablo formatında mailleri ara
+        # 2. Tablolardan mailleri çıkar
         tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')[1:]  # İlk satır header olabilir
-            for row in rows:
+        logger.info(f"🔍 {len(tables)} tablo bulundu")
+        
+        for i, table in enumerate(tables):
+            rows = table.find_all('tr')
+            logger.info(f"📊 Tablo {i+1}: {len(rows)} satır")
+            
+            for j, row in enumerate(rows[1:]):  # İlk satır header olabilir
                 cells = row.find_all(['td', 'div'])
+                
                 if len(cells) >= 2:
                     email_data = {
                         'from': cells[0].get_text(strip=True),
@@ -75,64 +76,66 @@ def get_emails_simple(email_address):
                         'date': cells[2].get_text(strip=True) if len(cells) > 2 else '',
                         'to': email_address,
                         'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'source': 'table'
+                        'source': f'table_{i+1}_row_{j+1}'
                     }
-                    if email_data['from'] or email_data['subject']:
+                    
+                    # Boş olmayan mailleri ekle
+                    if email_data['from'].strip() or email_data['subject'].strip():
                         emails.append(email_data)
+                        logger.info(f"✅ Mail bulundu: {email_data['from']} - {email_data['subject']}")
         
-        # 3. Div formatında mailleri ara
-        email_divs = soup.find_all('div', class_=re.compile(r'email|mail|message', re.I))
-        for div in email_divs:
-            # From bilgisini ara
-            from_elem = div.find(['span', 'div'], class_=re.compile(r'from|sender', re.I))
-            from_text = from_elem.get_text(strip=True) if from_elem else ''
-            
-            # Subject bilgisini ara
-            subject_elem = div.find(['span', 'div'], class_=re.compile(r'subject|title', re.I))
-            subject_text = subject_elem.get_text(strip=True) if subject_elem else ''
-            
-            if from_text or subject_text:
-                emails.append({
-                    'from': from_text,
-                    'subject': subject_text,
-                    'date': '',
-                    'to': email_address,
-                    'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                    'source': 'div'
-                })
+        # 3. Email listesi container'ını ara
+        email_containers = soup.find_all('div', class_=re.compile(r'email|mail|list|container', re.I))
+        logger.info(f"🔍 {len(email_containers)} email konteyneri bulundu")
         
-        # 4. JSON formatında mailleri ara
-        script_tags = soup.find_all('script')
-        for script in script_tags:
+        for container in email_containers:
+            # Container içindeki tüm linkleri kontrol et
+            links = container.find_all('a', href=True)
+            for link in links:
+                link_text = link.get_text(strip=True)
+                if link_text and len(link_text) > 5:  # Anlamlı metin
+                    emails.append({
+                        'from': 'Link',
+                        'subject': link_text,
+                        'date': '',
+                        'to': email_address,
+                        'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'source': 'link_container'
+                    })
+        
+        # 4. Script tag'lerinden JSON verilerini ara
+        scripts = soup.find_all('script')
+        for script in scripts:
             if script.string:
-                # JSON pattern'leri ara
+                # Email verisi içeren JSON'ları ara
                 json_patterns = [
-                    r'\{"from":"([^"]+)","subject":"([^"]+)"[^}]*\}',
                     r'"from":"([^"]+)".*?"subject":"([^"]+)"',
-                    r"'from':'([^']+)'.*?'subject':'([^']+)'"
+                    r"'from':'([^']+)'.*?'subject':'([^']+)'",
+                    r'from[^:]*:[^"]*"([^"]+)".*?subject[^:]*:[^"]*"([^"]+)"'
                 ]
                 
                 for pattern in json_patterns:
                     matches = re.findall(pattern, script.string, re.DOTALL)
                     for match in matches:
-                        if len(match) == 2:
+                        if len(match) == 2 and (match[0].strip() or match[1].strip()):
                             emails.append({
-                                'from': match[0],
-                                'subject': match[1],
+                                'from': match[0].strip(),
+                                'subject': match[1].strip(),
                                 'date': '',
                                 'to': email_address,
                                 'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                                'source': 'json'
+                                'source': 'json_script'
                             })
         
-        logger.info(f"✅ {len(emails)} mail bulundu")
+        logger.info(f"🎯 Toplam {len(emails)} mail bulundu")
         
         return {
             "status": "success",
             "email": email_address,
             "total_emails": len(emails),
             "emails": emails,
-            "url_used": inbox_url
+            "url_used": inbox_url,
+            "page_title": soup.title.string if soup.title else "No title"
         }
         
     except Exception as e:
@@ -147,16 +150,18 @@ def get_emails_simple(email_address):
 def home():
     return jsonify({
         "status": "active",
-        "service": "Simple EmailFake Scraper",
+        "service": "EmailFake Scraper - Correct URL Format",
         "usage": "POST /get-emails with {'email': 'address@domain.com'}",
+        "url_format": "https://tr.emailfake.com/mail{domain}/{username}",
         "example": {
-            "email": "fedotiko@newdailys.com"
+            "email": "fedotiko@newdailys.com",
+            "url": "https://tr.emailfake.com/mailnewdailys.com/fedotiko"
         }
     })
 
 @app.route('/get-emails', methods=['POST'])
 def get_emails():
-    """Mailleri getir"""
+    """Mailleri getir - DOĞRU URL FORMATI"""
     data = request.get_json()
     email = data.get('email', '')
     
@@ -165,7 +170,7 @@ def get_emails():
     
     logger.info(f"📨 İstek: {email}")
     
-    result = get_emails_simple(email)
+    result = get_emails_correct_url(email)
     
     # Depolamaya kaydet
     if result['emails']:
@@ -173,31 +178,50 @@ def get_emails():
     
     return jsonify(result)
 
-@app.route('/emails/<email_address>')
-def list_emails(email_address):
-    """Depolanan mailleri göster"""
-    if email_address in email_storage:
+@app.route('/debug-url', methods=['POST'])
+def debug_url():
+    """URL debug endpoint"""
+    data = request.get_json()
+    email = data.get('email', 'fedotiko@newdailys.com')
+    
+    try:
+        username, domain = email.split('@')
+        correct_url = f"https://tr.emailfake.com/mail{domain}/{username}"
+        
+        session = requests.Session()
+        response = session.get(correct_url, timeout=10)
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
         return jsonify({
-            "email": email_address,
-            "total_emails": len(email_storage[email_address]),
-            "emails": email_storage[email_address]
+            "email": email,
+            "correct_url": correct_url,
+            "status_code": response.status_code,
+            "page_title": soup.title.string if soup.title else "No title",
+            "email_element_exists": bool(soup.find('span', id='email_ch_text')),
+            "tables_count": len(soup.find_all('table')),
+            "first_200_chars": response.text[:200]
         })
-    else:
-        return jsonify({
-            "email": email_address,
-            "total_emails": 0,
-            "emails": []
-        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
-@app.route('/test')
-def test():
-    """Test endpoint"""
-    return jsonify({
-        "status": "working",
-        "timestamp": time.time(),
-        "message": "API çalışıyor"
-    })
+@app.route('/test-url/<email>')
+def test_url(email):
+    """URL test endpoint (GET)"""
+    try:
+        username, domain = email.split('@')
+        correct_url = f"https://tr.emailfake.com/mail{domain}/{username}"
+        
+        return jsonify({
+            "email": email,
+            "generated_url": correct_url,
+            "test_link": f'<a href="{correct_url}" target="_blank">Test URL</a>'
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 if __name__ == '__main__':
-    logger.info("🚀 Basit Email Scraper Başlatılıyor...")
+    logger.info("🚀 EmailFake Scraper (Doğru URL) Başlatılıyor...")
     app.run(host='0.0.0.0', port=10000, debug=False)
