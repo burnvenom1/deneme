@@ -1,5 +1,2 @@
 Flask==2.3.3
-python-socketio==5.8.0
-websocket-client==1.6.3
-python-engineio==4.7.1
-requests==2.31.0
+lxml==4.9.3
