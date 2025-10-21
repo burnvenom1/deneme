@@ -1,10 +1,16 @@
-# 📁 app.py - TEMİZLENMİŞ EMAIL DATA
+# 📁 app.py - SSL SORUNSUZ
 from flask import Flask, jsonify, request
 import requests
 import time
 import logging
 import re
 from bs4 import BeautifulSoup
+import urllib3
+import warnings
+
+# SSL warning'larını kapat
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -13,117 +19,134 @@ logger = logging.getLogger(__name__)
 # Mail depolama
 email_storage = {}
 
-def clean_email_data(emails):
-    """Email datalarını temizle ve normalize et"""
-    cleaned_emails = []
-    seen_subjects = set()
-    
-    for email in emails:
-        # Boş veya anlamsız dataları filtrele
-        from_text = email.get('from', '').strip()
-        subject_text = email.get('subject', '').strip()
-        date_text = email.get('date', '').strip()
-        
-        # Filtreleme kuralları
-        if not from_text and not subject_text:
-            continue  # Tamamen boş
-            
-        if len(subject_text) < 5 and len(from_text) < 5:
-            continue  # Çok kısa
-            
-        if any(keyword in subject_text.lower() for keyword in ['incele', 'görüntüle', 'numara', 'tl', 'teslimat']):
-            continue  # Spam/HTML fragment'leri
-            
-        if subject_text in seen_subjects:
-            continue  # Duplicate subject
-            
-        # Email formatını kontrol et
-        if '@' not in from_text and not any(domain in from_text.lower() for domain in ['.com', '.net', '.org']):
-            # From kısmı email adresi değilse, muhtemelen spam
-            if len(from_text) > 50:
-                continue
-        
-        # Temizlenmiş email
-        cleaned_email = {
-            'from': from_text[:100],  # Max 100 karakter
-            'subject': subject_text[:150],  # Max 150 karakter  
-            'date': date_text[:50] if date_text else time.strftime('%Y-%m-%d %H:%M:%S'),
-            'to': email.get('to', ''),
-            'received_at': email.get('received_at', ''),
-            'source': 'cleaned'
-        }
-        
-        cleaned_emails.append(cleaned_email)
-        seen_subjects.add(subject_text)
-    
-    return cleaned_emails
-
-def get_emails_clean(email_address):
-    """Temizlenmiş email datalarını getir"""
+def get_emails_safe(email_address):
+    """Güvenli ve SSL sorunsuz email getirme"""
     try:
         username, domain = email_address.split('@')
         
-        # Doğru URL
-        base_url = "https://tr.emailfake.com"
-        inbox_url = f"{base_url}/mail{domain}/{username}"
+        # Doğru URL - sadece bir tane kullan
+        inbox_url = f"https://tr.emailfake.com/mail{domain}/{username}"
         
         logger.info(f"🌐 Sayfa açılıyor: {inbox_url}")
         
-        # Session
+        # Basit session - SSL verify kapalı
         session = requests.Session()
+        session.verify = False  # SSL sertifikasını doğrulama
+        
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
         }
         
-        response = session.get(inbox_url, headers=headers, timeout=15)
+        # Daha kısa timeout ile dene
+        response = session.get(inbox_url, headers=headers, timeout=10, verify=False)
         
         if response.status_code != 200:
             return {
                 "status": "error",
-                "error": f"HTTP {response.status_code}",
+                "error": f"HTTP {response.status_code}: Sayfa yüklenemedi",
                 "emails": []
             }
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Ham email'leri topla
-        raw_emails = []
+        # Debug: Sayfa içeriğini kontrol et
+        page_title = soup.title.string if soup.title else "No title"
+        logger.info(f"📄 Sayfa başlığı: {page_title}")
         
-        # Tablo parsing
-        tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')[1:]  # Header'ı atla
-            for row in rows:
+        # Email adresini kontrol et
+        email_elem = soup.find('span', id='email_ch_text')
+        if email_elem:
+            current_email = email_elem.get_text(strip=True)
+            logger.info(f"📧 Aktif email: {current_email}")
+        
+        # 1. ÖNCE: Email listesi container'ını ara
+        emails = []
+        
+        # EmailFake'in email listesi için spesifik container
+        email_container = soup.find('div', class_=re.compile(r'email|mail|list', re.I))
+        if not email_container:
+            # Fallback: tüm sayfayı tara
+            email_container = soup
+        
+        # 2. Tablo formatında mailleri ara
+        tables = email_container.find_all('table')
+        logger.info(f"📊 {len(tables)} tablo bulundu")
+        
+        for table_idx, table in enumerate(tables):
+            rows = table.find_all('tr')
+            logger.info(f"📋 Tablo {table_idx}: {len(rows)} satır")
+            
+            for row_idx, row in enumerate(rows):
+                # Header satırını atla (genellikle ilk satır)
+                if row_idx == 0 and any('from' in cell.get_text().lower() or 'subject' in cell.get_text().lower() for cell in row.find_all(['td', 'th', 'div'])):
+                    continue
+                
                 cells = row.find_all(['td', 'div'])
                 if len(cells) >= 2:
-                    raw_emails.append({
-                        'from': cells[0].get_text(strip=True),
-                        'subject': cells[1].get_text(strip=True),
-                        'date': cells[2].get_text(strip=True) if len(cells) > 2 else '',
+                    from_text = cells[0].get_text(strip=True)
+                    subject_text = cells[1].get_text(strip=True)
+                    
+                    # Basit filtreleme
+                    if from_text and subject_text and len(subject_text) > 5:
+                        email_data = {
+                            'from': from_text,
+                            'subject': subject_text,
+                            'date': cells[2].get_text(strip=True) if len(cells) > 2 else '',
+                            'to': email_address,
+                            'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                            'source': f'table_{table_idx}_row_{row_idx}'
+                        }
+                        emails.append(email_data)
+                        logger.info(f"✅ Mail bulundu: {from_text} - {subject_text}")
+        
+        # 3. Eğer tabloda mail bulamazsak, linkleri kontrol et
+        if not emails:
+            logger.info("🔍 Linkler kontrol ediliyor...")
+            mail_links = email_container.find_all('a', href=re.compile(r'mail|email|message', re.I))
+            for link in mail_links:
+                link_text = link.get_text(strip=True)
+                if len(link_text) > 10:  # Anlamlı metin
+                    emails.append({
+                        'from': 'Link',
+                        'subject': link_text,
+                        'date': '',
                         'to': email_address,
                         'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'source': 'table'
+                        'source': 'link'
                     })
         
-        # Temizle
-        cleaned_emails = clean_email_data(raw_emails)
-        
-        logger.info(f"✅ {len(raw_emails)} ham -> {len(cleaned_emails)} temiz mail")
+        logger.info(f"🎯 {len(emails)} mail bulundu")
         
         return {
             "status": "success",
             "email": email_address,
-            "total_raw_emails": len(raw_emails),
-            "total_cleaned_emails": len(cleaned_emails),
-            "emails": cleaned_emails,
-            "url_used": inbox_url
+            "total_emails": len(emails),
+            "emails": emails,
+            "url_used": inbox_url,
+            "page_title": page_title
         }
         
-    except Exception as e:
-        logger.error(f"❌ Hata: {e}")
+    except requests.exceptions.Timeout:
+        logger.error("⏰ Timeout: Sayfa çok yavaş")
         return {
             "status": "error",
-            "error": str(e),
+            "error": "Timeout: Sayfa çok yavaş yükleniyor",
+            "emails": []
+        }
+    except requests.exceptions.ConnectionError:
+        logger.error("🔌 ConnectionError: Bağlantı hatası")
+        return {
+            "status": "error", 
+            "error": "ConnectionError: Bağlantı kurulamadı",
+            "emails": []
+        }
+    except Exception as e:
+        logger.error(f"❌ Beklenmeyen hata: {str(e)}")
+        return {
+            "status": "error",
+            "error": f"Beklenmeyen hata: {str(e)}",
             "emails": []
         }
 
@@ -131,13 +154,14 @@ def get_emails_clean(email_address):
 def home():
     return jsonify({
         "status": "active",
-        "service": "Clean EmailFake Scraper",
-        "usage": "POST /get-emails with {'email': 'address@domain.com'}"
+        "service": "EmailFake Scraper - SSL Fixed",
+        "usage": "POST /get-emails with {'email': 'address@domain.com'}",
+        "example": {"email": "fedotiko@newdailys.com"}
     })
 
 @app.route('/get-emails', methods=['POST'])
 def get_emails():
-    """Temizlenmiş mailleri getir"""
+    """Mailleri getir"""
     data = request.get_json()
     email = data.get('email', '')
     
@@ -146,67 +170,56 @@ def get_emails():
     
     logger.info(f"📨 İstek: {email}")
     
-    result = get_emails_clean(email)
+    result = get_emails_safe(email)
     
     if result['emails']:
         email_storage[email] = result['emails']
     
     return jsonify(result)
 
-@app.route('/emails/<email_address>')
-def list_emails(email_address):
-    """Depolanan mailleri göster"""
-    if email_address in email_storage:
-        return jsonify({
-            "email": email_address,
-            "total_emails": len(email_storage[email_address]),
-            "emails": email_storage[email_address]
-        })
-    else:
-        return jsonify({
-            "email": email_address,
-            "total_emails": 0,
-            "emails": []
-        })
-
-@app.route('/debug-raw', methods=['POST'])
-def debug_raw():
-    """Ham datayı göster (debug için)"""
+@app.route('/check-connection', methods=['POST'])
+def check_connection():
+    """Bağlantı testi"""
     data = request.get_json()
-    email = data.get('email', '')
+    email = data.get('email', 'fedotiko@newdailys.com')
     
     try:
         username, domain = email.split('@')
-        url = f"https://tr.emailfake.com/{domain}/{username}"
+        url = f"https://tr.emailfake.com/mail{domain}/{username}"
         
+        # Hızlı HEAD isteği
         session = requests.Session()
-        response = session.get(url, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        session.verify = False
         
-        # Tüm tabloları bul
-        tables = []
-        for i, table in enumerate(soup.find_all('table')):
-            table_data = []
-            rows = table.find_all('tr')
-            for row in rows:
-                cells = [cell.get_text(strip=True) for cell in row.find_all(['td', 'div'])]
-                table_data.append(cells)
-            tables.append({
-                'table_index': i,
-                'row_count': len(rows),
-                'data': table_data
-            })
+        start_time = time.time()
+        response = session.head(url, timeout=5, verify=False)
+        response_time = time.time() - start_time
         
         return jsonify({
             "email": email,
             "url": url,
-            "tables_found": len(tables),
-            "tables": tables[:3]  # İlk 3 tablo
+            "status_code": response.status_code,
+            "response_time": f"{response_time:.2f}s",
+            "accessible": response.status_code == 200,
+            "content_type": response.headers.get('content-type', '')
         })
         
     except Exception as e:
-        return jsonify({"error": str(e)})
+        return jsonify({
+            "email": email,
+            "error": str(e),
+            "accessible": False
+        })
+
+@app.route('/simple-test')
+def simple_test():
+    """Basit test endpoint"""
+    return jsonify({
+        "status": "working",
+        "timestamp": time.time(),
+        "message": "API çalışıyor - SSL sorunları giderildi"
+    })
 
 if __name__ == '__main__':
-    logger.info("🚀 Temiz Email Scraper Başlatılıyor...")
+    logger.info("🚀 SSL Sorunsuz Email Scraper Başlatılıyor...")
     app.run(host='0.0.0.0', port=10000, debug=False)
