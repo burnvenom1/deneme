@@ -25,7 +25,7 @@ def get_emails_safe(email_address):
         username, domain = email_address.split('@')
         
         # Doğru URL - sadece bir tane kullan
-        inbox_url = f"https://tr.emailfake.com/mail{domain}/{username}"
+        inbox_url = f"https://emailfake.com/{domain}/{username}"
         
         logger.info(f"🌐 Sayfa açılıyor: {inbox_url}")
         
@@ -185,7 +185,7 @@ def check_connection():
     
     try:
         username, domain = email.split('@')
-        url = f"https://tr.emailfake.com/mail{domain}/{username}"
+        url = f"https://emailfake.com/{domain}/{username}"
         
         # Hızlı HEAD isteği
         session = requests.Session()
