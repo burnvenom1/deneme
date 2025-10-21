@@ -1,2 +1,3 @@
+# requirements.txt
 Flask==2.3.3
-beautifulsoup4==4.12.2
+git+https://github.com/Podzied/catchclient.git
