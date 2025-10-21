@@ -1,231 +1,213 @@
-# 📁 app.py - TÜM MAİLLERİ İSTEYEN WEBSOCKET
+# 📁 app.py - API + WEBSOCKET KARMA ÇÖZÜM
 from flask import Flask, jsonify, request
-import socketio
+import requests
 import time
 import logging
-import threading
+import socketio
+import re
+import json
 
 app = Flask(__name__)
-
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mail depolama
 email_storage = {}
 
-class CompleteEmailMonitor:
+def get_emails_via_api(email_address):
+    """API veya sayfa scraping ile önceki mailleri al"""
+    try:
+        domain = email_address.split('@')[1]
+        
+        # 1. EmailFake API endpoint'ini dene
+        api_urls = [
+            f"https://{domain}/api/emails/{email_address}",
+            f"https://{domain}/api/inbox/{email_address}",
+            f"https://{domain}/inbox/{email_address}/json",
+            f"https://{domain}/inbox/{email_address}",
+        ]
+        
+        for api_url in api_urls:
+            try:
+                logger.info(f"🔍 API deneniyor: {api_url}")
+                response = requests.get(api_url, timeout=5)
+                
+                if response.status_code == 200:
+                    # JSON response
+                    data = response.json()
+                    if isinstance(data, list) or 'emails' in data:
+                        logger.info(f"✅ API başarılı: {len(data) if isinstance(data, list) else len(data.get('emails', []))} mail")
+                        return data
+            except:
+                continue
+        
+        # 2. Sayfayı çek ve mailleri parse et
+        logger.info(f"🌐 Sayfa çekiliyor: {email_address}")
+        inbox_url = f"https://{domain}/inbox/{email_address}"
+        response = requests.get(inbox_url, timeout=10)
+        
+        if response.status_code == 200:
+            # HTML'den email verilerini çıkar
+            emails = extract_emails_from_html(response.text)
+            if emails:
+                logger.info(f"✅ HTML'den {len(emails)} mail çıkarıldı")
+                return emails
+            
+        return []
+        
+    except Exception as e:
+        logger.error(f"❌ API hatası: {e}")
+        return []
+
+def extract_emails_from_html(html):
+    """HTML'den email verilerini çıkar"""
+    emails = []
+    
+    # Script tag'lerinden JSON verilerini ara
+    script_pattern = r'<script[^>]*>.*?(var\s+\w+\s*=\s*\{.*?\}).*?</script>'
+    script_matches = re.findall(script_pattern, html, re.DOTALL | re.IGNORECASE)
+    
+    for script in script_matches:
+        # JSON benzeri yapıları ara
+        json_patterns = [
+            r'\{[^{}]*"[^"]*"[^{}]*:[^{}]*[^}]*\}',
+            r'\[[^\]]*\{[^}]*\}[^\]]*\]',
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, script, re.DOTALL)
+            for match in matches:
+                try:
+                    data = json.loads(match)
+                    if isinstance(data, list) and len(data) > 0:
+                        # Mail listesi
+                        for item in data:
+                            if isinstance(item, dict) and ('from' in item or 'subject' in item):
+                                emails.append(item)
+                    elif isinstance(data, dict) and ('from' in data or 'subject' in data):
+                        # Tekil mail
+                        emails.append(data)
+                except:
+                    continue
+    
+    # Tablo satırlarından mailleri çıkar
+    table_pattern = r'<tr[^>]*>.*?<td[^>]*>(.*?)</td>.*?<td[^>]*>(.*?)</td>.*?<td[^>]*>(.*?)</td>'
+    table_matches = re.findall(table_pattern, html, re.DOTALL | re.IGNORECASE)
+    
+    for match in table_matches:
+        if len(match) >= 2:
+            emails.append({
+                'from': clean_html(match[0]),
+                'subject': clean_html(match[1]),
+                'date': clean_html(match[2]) if len(match) > 2 else '',
+                'source': 'html_table'
+            })
+    
+    return emails
+
+def clean_html(text):
+    """HTML tag'lerini temizle"""
+    return re.sub(r'<[^>]*>', '', text).strip()
+
+class HybridEmailMonitor:
     def __init__(self, email_address):
         self.email_address = email_address
         self.sio = None
         self.connected = False
-        self.all_emails = []  # TÜM mailler
-        self.emails_received = False
+        self.all_emails = []
+        self.new_emails = []
         
     def get_all_emails(self, wait_time=10):
-        """TÜM mailleri al (öncekiler + yeniler)"""
-        self.sio = socketio.Client(
-            logger=True,
-            engineio_logger=True,
-            reconnection=False
-        )
+        """API + WebSocket ile tüm mailleri al"""
         
-        @self.sio.event
-        def connect():
-            self.connected = True
-            logger.info(f"✅ ✅ ✅ WebSocket'e BAĞLANDI: {self.email_address}")
-            
-            # 1. ÖNCE: Önceki mailleri iste
-            self.sio.emit("get_emails", self.email_address)
-            self.sio.emit("get_all_emails", self.email_address)
-            self.sio.emit("load_emails", self.email_address)
-            self.sio.emit("fetch_emails", self.email_address)
-            
-            # 2. SONRA: Yeni mailleri dinle
-            self.sio.emit("watch_for_my_email", self.email_address)
-            self.sio.emit("subscribe", self.email_address)
-            
-            logger.info(f"📨 Tüm mail event'leri gönderildi: {self.email_address}")
+        # 1. ÖNCE: API ile önceki mailleri al
+        logger.info(f"📨 Önceki mailler API ile alınıyor: {self.email_address}")
+        previous_emails = get_emails_via_api(self.email_address)
         
-        @self.sio.event
-        def connect_error(data):
-            logger.error(f"❌ Bağlantı hatası: {data}")
-            self.connected = False
+        if isinstance(previous_emails, dict) and 'emails' in previous_emails:
+            previous_emails = previous_emails['emails']
         
-        @self.sio.event
-        def disconnect():
-            logger.info("🔌 Bağlantı kapandı")
-            self.connected = False
+        for email in previous_emails:
+            self.add_email(email, is_new=False)
         
-        @self.sio.on('new_email')
-        def on_new_email(data):
-            """YENİ MAIL"""
-            logger.info(f"🎉 YENİ MAIL: {data}")
-            self.process_email(data, is_new=True)
+        logger.info(f"📊 {len(previous_emails)} önceki mail alındı")
         
-        @self.sio.on('email')
-        def on_email(data):
-            """TEKIL MAIL"""
-            logger.info(f"📧 MAIL: {data}")
-            self.process_email(data)
+        # 2. SONRA: WebSocket ile yeni mailleri dinle
+        logger.info(f"🔌 WebSocket ile yeni mailler dinleniyor...")
+        ws_success = self.monitor_websocket(wait_time)
         
-        @self.sio.on('emails')
-        def on_emails(data):
-            """MAIL LISTESI"""
-            logger.info(f"📨 MAIL LISTESI: {len(data) if isinstance(data, list) else 'unknown'}")
-            if isinstance(data, list):
-                for email in data:
-                    self.process_email(email)
-            else:
-                self.process_email(data)
+        # 3. Sonuçları birleştir
+        all_emails = self.all_emails
         
-        @self.sio.on('email_list')
-        def on_email_list(data):
-            """MAIL LISTESI (alternatif)"""
-            logger.info(f"📋 EMAIL LIST: {data}")
-            self.process_email(data)
-        
-        # Tüm eventleri yakala
-        @self.sio.on('*')
-        def catch_all(event, data):
-            if event not in ['connect', 'disconnect', 'connect_error']:
-                logger.info(f"🔍 EVENT: {event} -> {data}")
-                # Email içeren event'leri işle
-                if any(keyword in event.lower() for keyword in ['email', 'mail']):
-                    self.process_email(data)
-        
+        return {
+            "status": "success" if all_emails else "no_emails",
+            "total_emails": len(all_emails),
+            "previous_emails": len(previous_emails),
+            "new_emails": len(self.new_emails),
+            "emails": all_emails,
+            "wait_time": wait_time,
+            "websocket_connected": ws_success
+        }
+    
+    def monitor_websocket(self, wait_time):
+        """WebSocket ile yeni mailleri dinle"""
         try:
-            logger.info(f"🔌 Tüm mailler alınıyor: {self.email_address}")
+            self.sio = socketio.Client(logger=False, reconnection=False)
+            
+            @self.sio.event
+            def connect():
+                self.connected = True
+                logger.info("✅ WebSocket bağlandı - yeni mailler dinleniyor...")
+                self.sio.emit("watch_for_my_email", self.email_address)
+            
+            @self.sio.event
+            def new_email(data):
+                logger.info(f"🎉 YENİ MAIL WEBSOCKET: {data}")
+                self.add_email(data, is_new=True)
             
             self.sio.connect(
                 "wss://tr.emailfake.com",
                 transports=['websocket'],
-                wait_timeout=10,
-                namespaces=['/']
+                wait_timeout=5
             )
             
-            # Bağlantı kontrolü
-            time.sleep(3)
+            # Kısa süre bekle
+            time.sleep(wait_time)
             
-            if not self.connected:
-                return {
-                    "status": "connection_failed",
-                    "error": "WebSocket bağlantısı kurulamadı",
-                    "emails": []
-                }
+            self.sio.disconnect()
+            return True
             
-            logger.info(f"⏳ {wait_time} saniye mailler bekleniyor...")
-            
-            # Mail bekleme döngüsü
-            start_time = time.time()
-            while time.time() - start_time < wait_time:
-                if len(self.all_emails) > 0:
-                    logger.info(f"⚡ {len(self.all_emails)} mail alındı!")
-                    # Mail geldi ama daha fazla bekleyelim
-                    time.sleep(1)
-                else:
-                    time.sleep(0.5)
-            
-            # Bağlantıyı kapat
-            try:
-                self.sio.disconnect()
-            except:
-                pass
-            
-            # Sonuçları döndür
-            if self.all_emails:
-                self.save_to_storage()
-                return {
-                    "status": "success",
-                    "total_emails": len(self.all_emails),
-                    "emails": self.all_emails,
-                    "wait_time": wait_time
-                }
-            else:
-                return {
-                    "status": "no_emails",
-                    "total_emails": 0,
-                    "emails": [],
-                    "wait_time": wait_time
-                }
-                    
         except Exception as e:
-            logger.error(f"❌ Monitor hatası: {e}")
-            try:
-                if self.sio:
-                    self.sio.disconnect()
-            except:
-                pass
-            return {
-                "status": "error",
-                "error": str(e),
-                "emails": []
-            }
+            logger.info(f"⚠️ WebSocket bağlanamadı: {e}")
+            return False
     
-    def process_email(self, data, is_new=False):
-        """Mail verisini işle"""
-        if not data:
+    def add_email(self, email_data, is_new=False):
+        """Mail ekle"""
+        if not email_data:
             return
             
-        # Data formatını kontrol et
-        email_data = None
+        email_info = {
+            'id': len(self.all_emails) + 1,
+            'from': email_data.get('from', 'Bilinmiyor'),
+            'subject': email_data.get('subject', 'Konu Yok'),
+            'date': email_data.get('date', ''),
+            'content': email_data.get('content', ''),
+            'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'timestamp': time.time(),
+            'is_new': is_new,
+            'source': 'websocket' if is_new else 'api'
+        }
         
-        if isinstance(data, dict) and ('from' in data or 'subject' in data):
-            # Direkt mail objesi
-            email_data = data
-        elif isinstance(data, list):
-            # Mail listesi
-            for item in data:
-                self.process_email(item, is_new)
-            return
-        elif isinstance(data, str):
-            # String format, parse etmeye çalış
-            try:
-                import json
-                parsed = json.loads(data)
-                self.process_email(parsed, is_new)
-                return
-            except:
-                pass
-        
-        if email_data:
-            email_info = {
-                'id': len(self.all_emails) + 1,
-                'from': email_data.get('from', 'Bilinmiyor'),
-                'subject': email_data.get('subject', 'Konu Yok'),
-                'date': email_data.get('date', 'Tarih Yok'),
-                'content': email_data.get('content', ''),
-                'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'timestamp': time.time(),
-                'is_new': is_new
-            }
-            
-            # Aynı maili ekleme
-            if email_info not in self.all_emails:
-                self.all_emails.append(email_info)
-                logger.info(f"📧 MAIL #{len(self.all_emails)}: {email_info['from']} - {email_info['subject']}")
-    
-    def save_to_storage(self):
-        """Mailleri depolamaya kaydet"""
-        if self.email_address not in email_storage:
-            email_storage[self.email_address] = []
-        
-        for email in self.all_emails:
-            if email not in email_storage[self.email_address]:
-                email_storage[self.email_address].append(email)
-
-@app.route('/')
-def home():
-    return jsonify({
-        "status": "active",
-        "service": "Complete EmailFake Monitor - Tüm Mailler",
-        "total_tracked_emails": sum(len(emails) for emails in email_storage.values()),
-        "usage": "POST /get-emails with {'email': 'address@domain.com'}"
-    })
+        # Aynı maili ekleme (basit deduplication)
+        existing = any(e['subject'] == email_info['subject'] and e['from'] == email_info['from'] for e in self.all_emails)
+        if not existing:
+            self.all_emails.append(email_info)
+            if is_new:
+                self.new_emails.append(email_info)
+            logger.info(f"📧 {'YENİ' if is_new else 'ÖNCEKİ'} MAIL: {email_info['from']} - {email_info['subject']}")
 
 @app.route('/get-emails', methods=['POST'])
 def get_emails():
-    """TÜM mailleri al"""
+    """API + WebSocket ile tüm mailleri al"""
     data = request.get_json()
     
     if not data or 'email' not in data:
@@ -234,63 +216,32 @@ def get_emails():
     email_address = data['email']
     wait_time = data.get('wait_time', 10)
     
-    logger.info(f"📨 TÜM MAİLLER isteği: {email_address}")
+    logger.info(f"📨 KARMA sistemi: {email_address}")
     
-    # Monitor oluştur ve başlat
-    monitor = CompleteEmailMonitor(email_address)
+    monitor = HybridEmailMonitor(email_address)
     result = monitor.get_all_emails(wait_time)
+    
+    # Depolamaya kaydet
+    if result['emails']:
+        email_storage[email_address] = result['emails']
     
     return jsonify(result)
 
-@app.route('/emails/<email_address>')
-def list_emails(email_address):
-    """Depolanan mailleri göster"""
-    if email_address in email_storage:
-        return jsonify({
-            "email": email_address,
-            "total_emails": len(email_storage[email_address]),
-            "emails": email_storage[email_address]
-        })
-    else:
-        return jsonify({
-            "email": email_address,
-            "total_emails": 0,
-            "emails": []
-        })
-
-@app.route('/test-event', methods=['POST'])
-def test_event():
-    """Event test endpoint"""
+@app.route('/test-api', methods=['POST'])
+def test_api():
+    """Sadece API testi"""
     data = request.get_json()
     email = data.get('email', '')
-    event_name = data.get('event', 'get_emails')
     
-    import websocket
-    import json
-    import threading
+    emails = get_emails_via_api(email)
     
-    def on_message(ws, message):
-        print(f"📨 TEST MESAJ: {message}")
-    
-    def on_open(ws):
-        print("✅ TEST BAĞLANTI AÇILDI")
-        ws.send(json.dumps([event_name, email]))
-        print(f"🎯 TEST EVENT GÖNDERİLDİ: {event_name}")
-    
-    ws = websocket.WebSocketApp(
-        "wss://tr.emailfake.com/socket.io/?EIO=4&transport=websocket",
-        on_open=on_open,
-        on_message=on_message
-    )
-    
-    thread = threading.Thread(target=ws.run_forever)
-    thread.daemon = True
-    thread.start()
-    time.sleep(5)
-    ws.close()
-    
-    return jsonify({"status": "test_completed", "event": event_name})
+    return jsonify({
+        "status": "success",
+        "email": email,
+        "emails_found": len(emails),
+        "emails": emails
+    })
 
 if __name__ == '__main__':
-    logger.info("🚀 TÜM MAİLLER WebSocket Monitor Başlatılıyor...")
+    logger.info("🚀 API + WebSocket Karma Sistem Başlatılıyor...")
     app.run(host='0.0.0.0', port=10000, debug=False)
