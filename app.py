@@ -1,247 +1,322 @@
-# 📁 app.py - API + WEBSOCKET KARMA ÇÖZÜM
-from flask import Flask, jsonify, request
-import requests
+# 📁 app.py - EMAILFAKE HTML SCRAPER
+from urllib.request import build_opener, HTTPCookieProcessor, Request
+from urllib.parse import urljoin
+import http.cookiejar
+from lxml import etree, html
 import time
 import logging
-import socketio
-import re
-import json
+from flask import Flask, jsonify, request
+from pprint import pprint
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Mail depolama
 email_storage = {}
 
-def get_emails_via_api(email_address):
-    """API veya sayfa scraping ile önceki mailleri al"""
+def get_emails_from_emailfake(email_address, only_last_email=False):
+    """EmailFake'den mailleri çek"""
     try:
-        domain = email_address.split('@')[1]
+        # Cookie jar oluştur
+        cookie_jar = http.cookiejar.CookieJar()
+        session = build_opener(HTTPCookieProcessor(cookie_jar))
         
-        # 1. EmailFake API endpoint'ini dene
-        api_urls = [
-            f"https://{domain}/api/emails/{email_address}",
-            f"https://{domain}/api/inbox/{email_address}",
-            f"https://{domain}/inbox/{email_address}/json",
-            f"https://{domain}/inbox/{email_address}",
+        domain = email_address.split("@")[1]
+        username = email_address.split("@")[0]
+        
+        base_url = f"https://{domain}"
+        inbox_url = f"{base_url}/inbox/{email_address}"
+        
+        logger.info(f"🌐 EmailFake açılıyor: {inbox_url}")
+        
+        # Sayfayı aç
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        req = Request(inbox_url, headers=headers)
+        response = session.open(req)
+        html_content = response.read().decode("utf-8")
+        
+        # HTML'i parse et
+        tree = etree.HTML(html_content)
+        
+        emails = []
+        email_links = []
+        
+        # 1. ÖNCE: Mail listesini bul
+        logger.info("🔍 Mail listesi aranıyor...")
+        
+        # EmailFake'e özel selector'lar
+        mail_selectors = [
+            "//a[contains(@href, '/inbox/') and contains(@href, '/')]",
+            "//div[contains(@class, 'email')]//a",
+            "//tr[contains(@class, 'email')]//a",
+            "//table//tr//a[contains(@href, '/inbox/')]",
+            "//a[contains(@class, 'email-link')]",
         ]
         
-        for api_url in api_urls:
-            try:
-                logger.info(f"🔍 API deneniyor: {api_url}")
-                response = requests.get(api_url, timeout=5)
+        for selector in mail_selectors:
+            links = tree.xpath(selector)
+            if links:
+                logger.info(f"✅ {len(links)} mail linki bulundu")
+                email_links = links
+                break
+        
+        # Eğer link bulamazsak, direkt tablo satırlarını oku
+        if not email_links:
+            logger.info("🔍 Tablo satırları kontrol ediliyor...")
+            table_rows = tree.xpath("//table//tr[position()>1]")  # İlk satır header olabilir
+            if table_rows:
+                logger.info(f"✅ {len(table_rows)} tablo satırı bulundu")
+                # Tablo satırlarından mailleri çıkar
+                for row in table_rows:
+                    email_data = extract_email_from_table_row(row)
+                    if email_data:
+                        emails.append(email_data)
+                        if only_last_email:
+                            break
+        
+        # 2. SONRA: Her mailin detay sayfasına git
+        for i, link in enumerate(email_links):
+            if only_last_email and i > 0:
+                break
                 
-                if response.status_code == 200:
-                    # JSON response
-                    data = response.json()
-                    if isinstance(data, list) or 'emails' in data:
-                        logger.info(f"✅ API başarılı: {len(data) if isinstance(data, list) else len(data.get('emails', []))} mail")
-                        return data
-            except:
+            try:
+                mail_url = link.get('href')
+                if mail_url:
+                    # URL'yi tamamla
+                    if mail_url.startswith('/'):
+                        mail_url = urljoin(base_url, mail_url)
+                    elif not mail_url.startswith('http'):
+                        mail_url = urljoin(inbox_url, mail_url)
+                    
+                    logger.info(f"📧 Mail detayı açılıyor: {mail_url}")
+                    
+                    # Mail detay sayfasını aç
+                    mail_req = Request(mail_url, headers=headers)
+                    mail_response = session.open(mail_req)
+                    mail_html = mail_response.read().decode("utf-8")
+                    
+                    # Mail detaylarını parse et
+                    email_data = extract_email_details(mail_html, email_address)
+                    if email_data:
+                        emails.append(email_data)
+                        
+            except Exception as e:
+                logger.error(f"❌ Mail detay hatası: {e}")
                 continue
         
-        # 2. Sayfayı çek ve mailleri parse et
-        logger.info(f"🌐 Sayfa çekiliyor: {email_address}")
-        inbox_url = f"https://{domain}/inbox/{email_address}"
-        response = requests.get(inbox_url, timeout=10)
+        # 3. Eğer hiç mail bulamazsak, basit parsing yap
+        if not emails:
+            logger.info("🔍 Basit parsing deneniyor...")
+            emails = extract_emails_simple(tree, email_address)
         
-        if response.status_code == 200:
-            # HTML'den email verilerini çıkar
-            emails = extract_emails_from_html(response.text)
-            if emails:
-                logger.info(f"✅ HTML'den {len(emails)} mail çıkarıldı")
-                return emails
-            
-        return []
+        logger.info(f"📨 {len(emails)} mail başarıyla alındı")
+        
+        return {
+            "status": "success",
+            "email": email_address,
+            "total_emails": len(emails),
+            "emails": emails,
+            "only_last_email": only_last_email
+        }
         
     except Exception as e:
-        logger.error(f"❌ API hatası: {e}")
-        return []
+        logger.error(f"❌ Scraper hatası: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "emails": []
+        }
 
-def extract_emails_from_html(html):
-    """HTML'den email verilerini çıkar"""
-    emails = []
-    
-    # Script tag'lerinden JSON verilerini ara
-    script_pattern = r'<script[^>]*>.*?(var\s+\w+\s*=\s*\{.*?\}).*?</script>'
-    script_matches = re.findall(script_pattern, html, re.DOTALL | re.IGNORECASE)
-    
-    for script in script_matches:
-        # JSON benzeri yapıları ara
-        json_patterns = [
-            r'\{[^{}]*"[^"]*"[^{}]*:[^{}]*[^}]*\}',
-            r'\[[^\]]*\{[^}]*\}[^\]]*\]',
+def extract_email_from_table_row(row):
+    """Tablo satırından email verilerini çıkar"""
+    try:
+        cells = row.xpath(".//td")
+        if len(cells) >= 3:
+            return {
+                'from': ' '.join(cells[0].xpath(".//text()")).strip(),
+                'subject': ' '.join(cells[1].xpath(".//text()")).strip(),
+                'date': ' '.join(cells[2].xpath(".//text()")).strip(),
+                'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'source': 'table_row'
+            }
+    except:
+        pass
+    return None
+
+def extract_email_details(mail_html, email_address):
+    """Mail detay sayfasından email bilgilerini çıkar"""
+    try:
+        tree = etree.HTML(mail_html)
+        
+        # Farklı email detail formatları
+        email_data = {}
+        
+        # Format 1: Email başlık bilgileri
+        from_selectors = [
+            "//div[contains(text(), 'From:')]/following-sibling::div",
+            "//span[contains(text(), 'From:')]/following-sibling::span",
+            "//b[contains(text(), 'From:')]/following-sibling::text()",
         ]
         
-        for pattern in json_patterns:
-            matches = re.findall(pattern, script, re.DOTALL)
-            for match in matches:
-                try:
-                    data = json.loads(match)
-                    if isinstance(data, list) and len(data) > 0:
-                        # Mail listesi
-                        for item in data:
-                            if isinstance(item, dict) and ('from' in item or 'subject' in item):
-                                emails.append(item)
-                    elif isinstance(data, dict) and ('from' in data or 'subject' in data):
-                        # Tekil mail
-                        emails.append(data)
-                except:
-                    continue
-    
-    # Tablo satırlarından mailleri çıkar
-    table_pattern = r'<tr[^>]*>.*?<td[^>]*>(.*?)</td>.*?<td[^>]*>(.*?)</td>.*?<td[^>]*>(.*?)</td>'
-    table_matches = re.findall(table_pattern, html, re.DOTALL | re.IGNORECASE)
-    
-    for match in table_matches:
-        if len(match) >= 2:
-            emails.append({
-                'from': clean_html(match[0]),
-                'subject': clean_html(match[1]),
-                'date': clean_html(match[2]) if len(match) > 2 else '',
-                'source': 'html_table'
+        subject_selectors = [
+            "//div[contains(text(), 'Subject:')]/following-sibling::div",
+            "//span[contains(text(), 'Subject:')]/following-sibling::span", 
+            "//b[contains(text(), 'Subject:')]/following-sibling::text()",
+        ]
+        
+        date_selectors = [
+            "//div[contains(text(), 'Date:')]/following-sibling::div",
+            "//span[contains(text(), 'Date:')]/following-sibling::span",
+            "//b[contains(text(), 'Date:')]/following-sibling::text()",
+        ]
+        
+        # Göndereni bul
+        for selector in from_selectors:
+            elements = tree.xpath(selector)
+            if elements:
+                email_data['from'] = ' '.join(elements[0].xpath(".//text()")).strip()
+                break
+        
+        # Konuyu bul
+        for selector in subject_selectors:
+            elements = tree.xpath(selector)
+            if elements:
+                email_data['subject'] = ' '.join(elements[0].xpath(".//text()")).strip()
+                break
+        
+        # Tarihi bul
+        for selector in date_selectors:
+            elements = tree.xpath(selector)
+            if elements:
+                email_data['date'] = ' '.join(elements[0].xpath(".//text()")).strip()
+                break
+        
+        # İçeriği bul
+        content_selectors = [
+            "//div[contains(@class, 'email-content')]",
+            "//div[contains(@class, 'mail-body')]",
+            "//pre",
+            "//div[contains(@style, 'font-family')]"
+        ]
+        
+        for selector in content_selectors:
+            elements = tree.xpath(selector)
+            if elements:
+                email_data['content'] = ' '.join(elements[0].xpath(".//text()")).strip()
+                break
+        
+        if email_data.get('from') or email_data.get('subject'):
+            email_data.update({
+                'to': email_address,
+                'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'source': 'detail_page'
             })
+            return email_data
+            
+    except Exception as e:
+        logger.error(f"❌ Mail detay parsing hatası: {e}")
+    
+    return None
+
+def extract_emails_simple(tree, email_address):
+    """Basit parsing fallback"""
+    emails = []
+    
+    # Tüm metinleri tarayıp email benzeri yapıları bul
+    all_text = ' '.join(tree.xpath("//text()"))
+    
+    # Email pattern'leri ara
+    import re
+    email_patterns = [
+        r'From:\s*([^\n\r<]+)',
+        r'Sender:\s*([^\n\r<]+)',
+        r'Subject:\s*([^\n\r<]+)',
+        r'Konu:\s*([^\n\r<]+)',
+    ]
+    
+    email_data = {}
+    for pattern in email_patterns:
+        matches = re.findall(pattern, all_text, re.IGNORECASE)
+        if matches:
+            key = 'from' if 'from' in pattern.lower() or 'sender' in pattern.lower() else 'subject'
+            email_data[key] = matches[0].strip()
+    
+    if email_data:
+        emails.append({
+            **email_data,
+            'to': email_address,
+            'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'source': 'simple_parsing'
+        })
     
     return emails
 
-def clean_html(text):
-    """HTML tag'lerini temizle"""
-    return re.sub(r'<[^>]*>', '', text).strip()
-
-class HybridEmailMonitor:
-    def __init__(self, email_address):
-        self.email_address = email_address
-        self.sio = None
-        self.connected = False
-        self.all_emails = []
-        self.new_emails = []
-        
-    def get_all_emails(self, wait_time=10):
-        """API + WebSocket ile tüm mailleri al"""
-        
-        # 1. ÖNCE: API ile önceki mailleri al
-        logger.info(f"📨 Önceki mailler API ile alınıyor: {self.email_address}")
-        previous_emails = get_emails_via_api(self.email_address)
-        
-        if isinstance(previous_emails, dict) and 'emails' in previous_emails:
-            previous_emails = previous_emails['emails']
-        
-        for email in previous_emails:
-            self.add_email(email, is_new=False)
-        
-        logger.info(f"📊 {len(previous_emails)} önceki mail alındı")
-        
-        # 2. SONRA: WebSocket ile yeni mailleri dinle
-        logger.info(f"🔌 WebSocket ile yeni mailler dinleniyor...")
-        ws_success = self.monitor_websocket(wait_time)
-        
-        # 3. Sonuçları birleştir
-        all_emails = self.all_emails
-        
-        return {
-            "status": "success" if all_emails else "no_emails",
-            "total_emails": len(all_emails),
-            "previous_emails": len(previous_emails),
-            "new_emails": len(self.new_emails),
-            "emails": all_emails,
-            "wait_time": wait_time,
-            "websocket_connected": ws_success
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "active",
+        "service": "EmailFake HTML Scraper",
+        "usage": {
+            "all_emails": "POST /get-emails with {'email': 'address@domain.com'}",
+            "last_email": "POST /get-last-email with {'email': 'address@domain.com'}"
         }
-    
-    def monitor_websocket(self, wait_time):
-        """WebSocket ile yeni mailleri dinle"""
-        try:
-            self.sio = socketio.Client(logger=False, reconnection=False)
-            
-            @self.sio.event
-            def connect():
-                self.connected = True
-                logger.info("✅ WebSocket bağlandı - yeni mailler dinleniyor...")
-                self.sio.emit("watch_for_my_email", self.email_address)
-            
-            @self.sio.event
-            def new_email(data):
-                logger.info(f"🎉 YENİ MAIL WEBSOCKET: {data}")
-                self.add_email(data, is_new=True)
-            
-            self.sio.connect(
-                "wss://tr.emailfake.com",
-                transports=['websocket'],
-                wait_timeout=5
-            )
-            
-            # Kısa süre bekle
-            time.sleep(wait_time)
-            
-            self.sio.disconnect()
-            return True
-            
-        except Exception as e:
-            logger.info(f"⚠️ WebSocket bağlanamadı: {e}")
-            return False
-    
-    def add_email(self, email_data, is_new=False):
-        """Mail ekle"""
-        if not email_data:
-            return
-            
-        email_info = {
-            'id': len(self.all_emails) + 1,
-            'from': email_data.get('from', 'Bilinmiyor'),
-            'subject': email_data.get('subject', 'Konu Yok'),
-            'date': email_data.get('date', ''),
-            'content': email_data.get('content', ''),
-            'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'timestamp': time.time(),
-            'is_new': is_new,
-            'source': 'websocket' if is_new else 'api'
-        }
-        
-        # Aynı maili ekleme (basit deduplication)
-        existing = any(e['subject'] == email_info['subject'] and e['from'] == email_info['from'] for e in self.all_emails)
-        if not existing:
-            self.all_emails.append(email_info)
-            if is_new:
-                self.new_emails.append(email_info)
-            logger.info(f"📧 {'YENİ' if is_new else 'ÖNCEKİ'} MAIL: {email_info['from']} - {email_info['subject']}")
+    })
 
 @app.route('/get-emails', methods=['POST'])
 def get_emails():
-    """API + WebSocket ile tüm mailleri al"""
-    data = request.get_json()
-    
-    if not data or 'email' not in data:
-        return jsonify({"error": "Email adresi gerekli"}), 400
-    
-    email_address = data['email']
-    wait_time = data.get('wait_time', 10)
-    
-    logger.info(f"📨 KARMA sistemi: {email_address}")
-    
-    monitor = HybridEmailMonitor(email_address)
-    result = monitor.get_all_emails(wait_time)
-    
-    # Depolamaya kaydet
-    if result['emails']:
-        email_storage[email_address] = result['emails']
-    
-    return jsonify(result)
-
-@app.route('/test-api', methods=['POST'])
-def test_api():
-    """Sadece API testi"""
+    """Tüm mailleri getir"""
     data = request.get_json()
     email = data.get('email', '')
     
-    emails = get_emails_via_api(email)
+    if not email:
+        return jsonify({"error": "Email adresi gerekli"}), 400
     
-    return jsonify({
-        "status": "success",
-        "email": email,
-        "emails_found": len(emails),
-        "emails": emails
-    })
+    logger.info(f"📨 TÜM MAİLLER isteği: {email}")
+    
+    result = get_emails_from_emailfake(email, only_last_email=False)
+    
+    # Depolamaya kaydet
+    if result['emails']:
+        email_storage[email] = result['emails']
+    
+    return jsonify(result)
+
+@app.route('/get-last-email', methods=['POST'])
+def get_last_email():
+    """Sadece son maili getir"""
+    data = request.get_json()
+    email = data.get('email', '')
+    
+    if not email:
+        return jsonify({"error": "Email adresi gerekli"}), 400
+    
+    logger.info(f"📨 SON MAIL isteği: {email}")
+    
+    result = get_emails_from_emailfake(email, only_last_email=True)
+    
+    return jsonify(result)
+
+@app.route('/emails/<email_address>')
+def list_emails(email_address):
+    """Depolanan mailleri göster"""
+    if email_address in email_storage:
+        return jsonify({
+            "email": email_address,
+            "total_emails": len(email_storage[email_address]),
+            "emails": email_storage[email_address]
+        })
+    else:
+        return jsonify({
+            "email": email_address,
+            "total_emails": 0,
+            "emails": []
+        })
 
 if __name__ == '__main__':
-    logger.info("🚀 API + WebSocket Karma Sistem Başlatılıyor...")
+    logger.info("🚀 EmailFake HTML Scraper Başlatılıyor...")
     app.run(host='0.0.0.0', port=10000, debug=False)
