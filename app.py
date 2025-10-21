@@ -1,139 +1,139 @@
-# emailfake-monitor/app.py
+# 📁 app.py - SADECE WEB SOCKET
 from flask import Flask, jsonify
 import socketio
-import smtplib
-from email.mime.text import MimeText
-from email.mime.multipart import MimeMultipart
-import os
 import time
 import logging
+import threading
 
 app = Flask(__name__)
 sio = socketio.Client()
-
-# Email ayarları - RENDER'da environment variables olacak
-SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
-SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
-EMAIL_USER = os.getenv('EMAIL_USER', 'your_email@gmail.com')
-EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD', 'your_app_password')
-TO_EMAIL = os.getenv('TO_EMAIL', 'notification@yourdomain.com')
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def send_email_notification(mail_data):
-    """Render'dan direkt email gönder"""
-    try:
-        subject = f"📧 Yeni Mail: {mail_data.get('subject', 'Konu Yok')}"
-        
-        body = f"""
-🎉 YENİ MAIL ALGILANDI!
-
-📨 Takip Edilen Email: fedotiko@newdailys.com
-👤 Gönderen: {mail_data.get('from', 'Bilinmiyor')}
-📌 Konu: {mail_data.get('subject', 'Konu Yok')}
-📅 Tarih: {mail_data.get('date', 'Tarih Yok')}
-
-⏰ Algılama Zamanı: {time.strftime('%Y-%m-%d %H:%M:%S')}
-🔍 Kaynak: EmailFake + Render API
-
----
-🤖 Otomatik Bildirim Sistemi
-        """.strip()
-
-        # Email oluştur
-        msg = MimeMultipart()
-        msg['From'] = EMAIL_USER
-        msg['To'] = TO_EMAIL
-        msg['Subject'] = subject
-        msg.attach(MimeText(body, 'plain'))
-        
-        # SMTP ile gönder
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        
-        logger.info(f"✅ Email gönderildi: {subject}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Email gönderme hatası: {e}")
-        return False
+# 📨 Gelen mailleri kaydet
+received_emails = []
+websocket_connected = False
 
 @sio.event
 def connect():
-    logger.info("✅ Emailfake WebSocket'e bağlandı!")
+    global websocket_connected
+    websocket_connected = True
+    logger.info("✅ ✅ ✅ EMAILFAKE WebSocket'e BAĞLANDI!")
+    
+    # Email takibini BAŞLAT
     sio.emit("watch_for_my_email", "fedotiko@newdailys.com")
+    logger.info("👂 fedotiko@newdailys.com TAKİBE ALINDI!")
 
 @sio.event
 def disconnect():
-    logger.warning("❌ Bağlantı kesildi, 10 saniye sonra yeniden bağlanıyor...")
-    time.sleep(10)
-    try:
-        sio.connect("wss://tr.emailfake.com")
-    except:
-        pass
+    global websocket_connected
+    websocket_connected = False
+    logger.error("❌ ❌ ❌ BAĞLANTI KESİLDİ!")
 
 @sio.event
 def new_email(data):
-    logger.info(f"🎉 YENİ MAIL ALGILANDI: {data}")
-    success = send_email_notification(data)
-    if success:
-        logger.info("✅ Bildirim başarıyla gönderildi")
-    else:
-        logger.error("❌ Bildirim gönderilemedi")
+    """YENİ MAIL GELDİĞİNDE BU FONKSİYON ÇALIŞIR"""
+    logger.info("🎉 🎉 🎉 YENİ MAIL GELDİ!")
+    
+    # Mail bilgilerini işle
+    email_info = {
+        'from': data.get('from', 'Bilinmiyor'),
+        'subject': data.get('subject', 'Konu Yok'),
+        'date': data.get('date', 'Tarih Yok'),
+        'received_at': time.strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    # Mailler listesine ekle
+    received_emails.append(email_info)
+    
+    logger.info(f"📧 GÖNDEREN: {email_info['from']}")
+    logger.info(f"📌 KONU: {email_info['subject']}")
+    logger.info(f"📅 TARİH: {email_info['date']}")
+    logger.info(f"⏰ ALGILANDI: {email_info['received_at']}")
+    logger.info("=" * 50)
 
 @app.route('/')
 def home():
+    """Ana sayfa - sistem durumu"""
     return jsonify({
         "status": "active",
-        "service": "EmailFake Monitor + Notification",
+        "service": "EmailFake WebSocket Monitor",
         "monitored_email": "fedotiko@newdailys.com",
-        "websocket_connected": sio.connected,
-        "notification_email": TO_EMAIL
+        "websocket_connected": websocket_connected,
+        "total_emails_received": len(received_emails),
+        "uptime": time.time()
+    })
+
+@app.route('/emails')
+def list_emails():
+    """Alınan tüm mailleri göster"""
+    return jsonify({
+        "total_emails": len(received_emails),
+        "emails": received_emails
     })
 
 @app.route('/health')
 def health():
+    """Sağlık kontrolü"""
     return jsonify({
-        "status": "healthy", 
-        "websocket_connected": sio.connected,
-        "timestamp": time.time()
-    })
-
-@app.route('/test-email')
-def test_email():
-    """Test emaili gönder"""
-    test_data = {
-        "from": "test@sender.com",
-        "subject": "Test Mail - Render API",
-        "date": time.strftime('%Y-%m-%d %H:%M:%S')
-    }
-    success = send_email_notification(test_data)
-    return jsonify({
-        "status": "success" if success else "error",
-        "message": "Test emaili gönderildi" if success else "Email gönderilemedi"
+        "status": "healthy" if websocket_connected else "unhealthy",
+        "websocket_connected": websocket_connected,
+        "timestamp": time.time(),
+        "last_10_emails": received_emails[-10:] if received_emails else []
     })
 
 def start_websocket():
     """WebSocket bağlantısını başlat"""
-    max_retries = 5
-    retry_delay = 10
+    max_retries = 10
+    retry_delay = 5
     
     for attempt in range(max_retries):
         try:
-            sio.connect("wss://tr.emailfake.com")
-            logger.info("🚀 WebSocket bağlantısı başlatıldı!")
+            logger.info(f"🔌 WebSocket bağlantısı deneniyor... ({attempt + 1}/{max_retries})")
+            
+            # EMAILFAKE WebSocket'ine bağlan
+            sio.connect(
+                "wss://tr.emailfake.com",
+                transports=['websocket'],
+                wait_timeout=10
+            )
+            
+            logger.info("🚀 🚀 🚀 WEB SOCKET BAĞLANTISI BAŞARILI!")
             break
+            
         except Exception as e:
-            logger.error(f"❌ Bağlantı hatası (deneme {attempt + 1}/{max_retries}): {e}")
+            logger.error(f"❌ Bağlantı hatası ({attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
+                logger.info(f"⏳ {retry_delay} saniye sonra yeniden deneniyor...")
                 time.sleep(retry_delay)
-                retry_delay *= 2
+                retry_delay = min(retry_delay * 1.5, 30)  # Exponential backoff
+    else:
+        logger.error("💥 MAXIMUM RETRY SAYISINA ULAŞILDI! Bağlantı kurulamadı.")
+
+def keep_alive():
+    """Bağlantıyı canlı tut"""
+    while True:
+        if not websocket_connected:
+            logger.warning("🔁 WebSocket bağlantısı kopmuş, yeniden bağlanılıyor...")
+            start_websocket()
+        time.sleep(30)  # 30 saniyede bir kontrol et
 
 if __name__ == '__main__':
-    start_websocket()
+    # WebSocket bağlantısını başlat
+    logger.info("🚀 EmailFake WebSocket Monitor Başlatılıyor...")
+    
+    # WebSocket i ayrı thread de başlat
+    websocket_thread = threading.Thread(target=start_websocket)
+    websocket_thread.daemon = True
+    websocket_thread.start()
+    
+    # Keep-alive thread i başlat
+    keep_alive_thread = threading.Thread(target=keep_alive)
+    keep_alive_thread.daemon = True
+    keep_alive_thread.start()
+    
+    # Flask uygulamasını başlat
+    logger.info("🌐 Flask Web Server Başlatılıyor...")
     app.run(host='0.0.0.0', port=10000, debug=False)
