@@ -1,8 +1,20 @@
-# 🚀 Hepsiburada Auto System
+# emailfake-monitor
+EmailFake mail takip sistemi - Render + WebSocket
 
-Tor IP Changer ile tam otomatik sistem.
+## 🚀 Özellikler
+- 📧 EmailFake WebSocket bağlantısı
+- 🔔 Otomatik email bildirimleri
+- 🌐 Render deployment
+- ⚡ Gerçek zamanlı takip
 
-## ⚡ Kurulum
-```bash
-npm install
-npm start
+## 🔧 Kurulum
+1. Render'da environment variables ayarla
+2. Deploy et
+3. Test et: `/test-email`
+
+## 📧 Environment Variables
+- `SMTP_SERVER`
+- `SMTP_PORT` 
+- `EMAIL_USER`
+- `EMAIL_PASSWORD`
+- `TO_EMAIL`
