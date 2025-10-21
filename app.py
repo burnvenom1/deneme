@@ -1,12 +1,12 @@
-# 📁 app.py - EMAILFAKE HTML SCRAPER
+# 📁 app.py - BEAUTIFULSOUP İLE EMAILFAKE SCRAPER
 from urllib.request import build_opener, HTTPCookieProcessor, Request
 from urllib.parse import urljoin
 import http.cookiejar
-from lxml import etree, html
 import time
 import logging
+import re
 from flask import Flask, jsonify, request
-from pprint import pprint
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -16,15 +16,13 @@ logger = logging.getLogger(__name__)
 email_storage = {}
 
 def get_emails_from_emailfake(email_address, only_last_email=False):
-    """EmailFake'den mailleri çek"""
+    """EmailFake'den mailleri çek (BeautifulSoup ile)"""
     try:
         # Cookie jar oluştur
         cookie_jar = http.cookiejar.CookieJar()
         session = build_opener(HTTPCookieProcessor(cookie_jar))
         
         domain = email_address.split("@")[1]
-        username = email_address.split("@")[0]
-        
         base_url = f"https://{domain}"
         inbox_url = f"{base_url}/inbox/{email_address}"
         
@@ -32,65 +30,58 @@ def get_emails_from_emailfake(email_address, only_last_email=False):
         
         # Sayfayı aç
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
         req = Request(inbox_url, headers=headers)
         response = session.open(req)
         html_content = response.read().decode("utf-8")
         
-        # HTML'i parse et
-        tree = etree.HTML(html_content)
+        # BeautifulSoup ile parse et
+        soup = BeautifulSoup(html_content, 'html.parser')
         
         emails = []
-        email_links = []
         
-        # 1. ÖNCE: Mail listesini bul
-        logger.info("🔍 Mail listesi aranıyor...")
+        # 1. Mail linklerini bul
+        logger.info("🔍 Mail linkleri aranıyor...")
         
-        # EmailFake'e özel selector'lar
-        mail_selectors = [
-            "//a[contains(@href, '/inbox/') and contains(@href, '/')]",
-            "//div[contains(@class, 'email')]//a",
-            "//tr[contains(@class, 'email')]//a",
-            "//table//tr//a[contains(@href, '/inbox/')]",
-            "//a[contains(@class, 'email-link')]",
+        mail_links = []
+        link_selectors = [
+            'a[href*="/inbox/"]',
+            'a[href*="email"]',
+            'a.email-link',
+            'a.mail-link'
         ]
         
-        for selector in mail_selectors:
-            links = tree.xpath(selector)
+        for selector in link_selectors:
+            links = soup.select(selector)
             if links:
-                logger.info(f"✅ {len(links)} mail linki bulundu")
-                email_links = links
-                break
+                mail_links.extend([link.get('href') for link in links])
+                logger.info(f"✅ {len(links)} mail linki bulundu: {selector}")
         
-        # Eğer link bulamazsak, direkt tablo satırlarını oku
-        if not email_links:
-            logger.info("🔍 Tablo satırları kontrol ediliyor...")
-            table_rows = tree.xpath("//table//tr[position()>1]")  # İlk satır header olabilir
-            if table_rows:
-                logger.info(f"✅ {len(table_rows)} tablo satırı bulundu")
-                # Tablo satırlarından mailleri çıkar
-                for row in table_rows:
-                    email_data = extract_email_from_table_row(row)
-                    if email_data:
-                        emails.append(email_data)
-                        if only_last_email:
-                            break
+        # Benzersiz linkler
+        mail_links = list(set(mail_links))
         
-        # 2. SONRA: Her mailin detay sayfasına git
-        for i, link in enumerate(email_links):
-            if only_last_email and i > 0:
-                break
-                
-            try:
-                mail_url = link.get('href')
-                if mail_url:
+        # 2. Tablo satırlarından mailleri çıkar
+        logger.info("🔍 Tablo satırları kontrol ediliyor...")
+        table_emails = extract_emails_from_table(soup, email_address)
+        emails.extend(table_emails)
+        
+        # 3. Mail detay sayfalarını kontrol et
+        if not emails and mail_links:
+            logger.info("🔍 Mail detay sayfaları kontrol ediliyor...")
+            for i, link in enumerate(mail_links):
+                if only_last_email and i > 0:
+                    break
+                    
+                try:
                     # URL'yi tamamla
-                    if mail_url.startswith('/'):
-                        mail_url = urljoin(base_url, mail_url)
-                    elif not mail_url.startswith('http'):
-                        mail_url = urljoin(inbox_url, mail_url)
+                    if link.startswith('/'):
+                        mail_url = urljoin(base_url, link)
+                    elif not link.startswith('http'):
+                        mail_url = urljoin(inbox_url, link)
+                    else:
+                        mail_url = link
                     
                     logger.info(f"📧 Mail detayı açılıyor: {mail_url}")
                     
@@ -98,20 +89,22 @@ def get_emails_from_emailfake(email_address, only_last_email=False):
                     mail_req = Request(mail_url, headers=headers)
                     mail_response = session.open(mail_req)
                     mail_html = mail_response.read().decode("utf-8")
+                    mail_soup = BeautifulSoup(mail_html, 'html.parser')
                     
                     # Mail detaylarını parse et
-                    email_data = extract_email_details(mail_html, email_address)
+                    email_data = extract_email_details(mail_soup, email_address)
                     if email_data:
                         emails.append(email_data)
                         
-            except Exception as e:
-                logger.error(f"❌ Mail detay hatası: {e}")
-                continue
+                except Exception as e:
+                    logger.error(f"❌ Mail detay hatası: {e}")
+                    continue
         
-        # 3. Eğer hiç mail bulamazsak, basit parsing yap
+        # 4. Basit parsing fallback
         if not emails:
             logger.info("🔍 Basit parsing deneniyor...")
-            emails = extract_emails_simple(tree, email_address)
+            simple_emails = extract_emails_simple(soup, email_address)
+            emails.extend(simple_emails)
         
         logger.info(f"📨 {len(emails)} mail başarıyla alındı")
         
@@ -131,82 +124,127 @@ def get_emails_from_emailfake(email_address, only_last_email=False):
             "emails": []
         }
 
-def extract_email_from_table_row(row):
-    """Tablo satırından email verilerini çıkar"""
-    try:
-        cells = row.xpath(".//td")
-        if len(cells) >= 3:
-            return {
-                'from': ' '.join(cells[0].xpath(".//text()")).strip(),
-                'subject': ' '.join(cells[1].xpath(".//text()")).strip(),
-                'date': ' '.join(cells[2].xpath(".//text()")).strip(),
-                'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'source': 'table_row'
-            }
-    except:
-        pass
-    return None
+def extract_emails_from_table(soup, email_address):
+    """Tablodan email verilerini çıkar"""
+    emails = []
+    
+    # Tablo selector'ları
+    table_selectors = [
+        'table',
+        'table tr',
+        '.email-table',
+        '.mail-table'
+    ]
+    
+    for selector in table_selectors:
+        rows = soup.select(selector)
+        if len(rows) > 1:  # Header + en az 1 data satırı
+            logger.info(f"✅ Tablo bulundu: {selector} - {len(rows)} satır")
+            
+            for row in rows[1:]:  # İlk satır header olabilir
+                cells = row.find_all(['td', 'div'])
+                if len(cells) >= 2:
+                    email_data = {
+                        'from': cells[0].get_text(strip=True) if len(cells) > 0 else '',
+                        'subject': cells[1].get_text(strip=True) if len(cells) > 1 else '',
+                        'date': cells[2].get_text(strip=True) if len(cells) > 2 else '',
+                        'to': email_address,
+                        'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'source': 'table'
+                    }
+                    
+                    # Boş olmayan mailleri ekle
+                    if email_data['from'] or email_data['subject']:
+                        emails.append(email_data)
+            break
+    
+    return emails
 
-def extract_email_details(mail_html, email_address):
+def extract_email_details(soup, email_address):
     """Mail detay sayfasından email bilgilerini çıkar"""
     try:
-        tree = etree.HTML(mail_html)
-        
-        # Farklı email detail formatları
         email_data = {}
         
-        # Format 1: Email başlık bilgileri
+        # From bilgisini bul
         from_selectors = [
-            "//div[contains(text(), 'From:')]/following-sibling::div",
-            "//span[contains(text(), 'From:')]/following-sibling::span",
-            "//b[contains(text(), 'From:')]/following-sibling::text()",
+            'div:contains("From:")',
+            'span:contains("From:")',
+            'b:contains("From:")',
+            'td:contains("From:")'
         ]
         
-        subject_selectors = [
-            "//div[contains(text(), 'Subject:')]/following-sibling::div",
-            "//span[contains(text(), 'Subject:')]/following-sibling::span", 
-            "//b[contains(text(), 'Subject:')]/following-sibling::text()",
-        ]
-        
-        date_selectors = [
-            "//div[contains(text(), 'Date:')]/following-sibling::div",
-            "//span[contains(text(), 'Date:')]/following-sibling::span",
-            "//b[contains(text(), 'Date:')]/following-sibling::text()",
-        ]
-        
-        # Göndereni bul
         for selector in from_selectors:
-            elements = tree.xpath(selector)
-            if elements:
-                email_data['from'] = ' '.join(elements[0].xpath(".//text()")).strip()
+            element = soup.find(text=re.compile('From:', re.IGNORECASE))
+            if element:
+                parent = element.parent
+                # Sonraki element veya text'i al
+                next_element = parent.find_next_sibling()
+                if next_element:
+                    email_data['from'] = next_element.get_text(strip=True)
+                else:
+                    # Text içinden al
+                    full_text = parent.get_text()
+                    match = re.search(r'From:\s*(.+)', full_text, re.IGNORECASE)
+                    if match:
+                        email_data['from'] = match.group(1).strip()
                 break
         
-        # Konuyu bul
+        # Subject bilgisini bul
+        subject_selectors = [
+            'div:contains("Subject:")',
+            'span:contains("Subject:")',
+            'b:contains("Subject:")',
+            'td:contains("Subject:")'
+        ]
+        
         for selector in subject_selectors:
-            elements = tree.xpath(selector)
-            if elements:
-                email_data['subject'] = ' '.join(elements[0].xpath(".//text()")).strip()
+            element = soup.find(text=re.compile('Subject:', re.IGNORECASE))
+            if element:
+                parent = element.parent
+                next_element = parent.find_next_sibling()
+                if next_element:
+                    email_data['subject'] = next_element.get_text(strip=True)
+                else:
+                    full_text = parent.get_text()
+                    match = re.search(r'Subject:\s*(.+)', full_text, re.IGNORECASE)
+                    if match:
+                        email_data['subject'] = match.group(1).strip()
                 break
         
-        # Tarihi bul
+        # Date bilgisini bul
+        date_selectors = [
+            'div:contains("Date:")',
+            'span:contains("Date:")', 
+            'b:contains("Date:")',
+            'td:contains("Date:")'
+        ]
+        
         for selector in date_selectors:
-            elements = tree.xpath(selector)
-            if elements:
-                email_data['date'] = ' '.join(elements[0].xpath(".//text()")).strip()
+            element = soup.find(text=re.compile('Date:', re.IGNORECASE))
+            if element:
+                parent = element.parent
+                next_element = parent.find_next_sibling()
+                if next_element:
+                    email_data['date'] = next_element.get_text(strip=True)
+                else:
+                    full_text = parent.get_text()
+                    match = re.search(r'Date:\s*(.+)', full_text, re.IGNORECASE)
+                    if match:
+                        email_data['date'] = match.group(1).strip()
                 break
         
-        # İçeriği bul
+        # İçerik bilgisini bul
         content_selectors = [
-            "//div[contains(@class, 'email-content')]",
-            "//div[contains(@class, 'mail-body')]",
-            "//pre",
-            "//div[contains(@style, 'font-family')]"
+            '.email-content',
+            '.mail-body',
+            'pre',
+            'div[style*="font-family"]'
         ]
         
         for selector in content_selectors:
-            elements = tree.xpath(selector)
-            if elements:
-                email_data['content'] = ' '.join(elements[0].xpath(".//text()")).strip()
+            element = soup.select_one(selector)
+            if element:
+                email_data['content'] = element.get_text(strip=True)
                 break
         
         if email_data.get('from') or email_data.get('subject'):
@@ -222,15 +260,14 @@ def extract_email_details(mail_html, email_address):
     
     return None
 
-def extract_emails_simple(tree, email_address):
+def extract_emails_simple(soup, email_address):
     """Basit parsing fallback"""
     emails = []
     
-    # Tüm metinleri tarayıp email benzeri yapıları bul
-    all_text = ' '.join(tree.xpath("//text()"))
+    # Tüm metni al
+    all_text = soup.get_text()
     
     # Email pattern'leri ara
-    import re
     email_patterns = [
         r'From:\s*([^\n\r<]+)',
         r'Sender:\s*([^\n\r<]+)',
@@ -260,7 +297,7 @@ def extract_emails_simple(tree, email_address):
 def home():
     return jsonify({
         "status": "active",
-        "service": "EmailFake HTML Scraper",
+        "service": "EmailFake BeautifulSoup Scraper",
         "usage": {
             "all_emails": "POST /get-emails with {'email': 'address@domain.com'}",
             "last_email": "POST /get-last-email with {'email': 'address@domain.com'}"
@@ -318,5 +355,5 @@ def list_emails(email_address):
         })
 
 if __name__ == '__main__':
-    logger.info("🚀 EmailFake HTML Scraper Başlatılıyor...")
+    logger.info("🚀 EmailFake BeautifulSoup Scraper Başlatılıyor...")
     app.run(host='0.0.0.0', port=10000, debug=False)
