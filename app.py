@@ -18,7 +18,7 @@ def get_emails_correct_url(email_address):
     try:
         username, domain = email_address.split('@')
         
-        # DOĞRU URL FORMATI: https://tr.emailfake.com/mail{domain}/{username}
+        # DOĞRU URL FORMATI: https://tr.emailfake.com/{domain}/{username}
         base_url = "https://tr.emailfake.com"
         inbox_url = f"{base_url}/mail{domain}/{username}"
         
@@ -152,10 +152,10 @@ def home():
         "status": "active",
         "service": "EmailFake Scraper - Correct URL Format",
         "usage": "POST /get-emails with {'email': 'address@domain.com'}",
-        "url_format": "https://tr.emailfake.com/mail{domain}/{username}",
+        "url_format": "https://tr.emailfake.com/{domain}/{username}",
         "example": {
             "email": "fedotiko@newdailys.com",
-            "url": "https://tr.emailfake.com/mailnewdailys.com/fedotiko"
+            "url": "https://tr.emailfake.com/newdailys.com/fedotiko"
         }
     })
 
@@ -186,7 +186,7 @@ def debug_url():
     
     try:
         username, domain = email.split('@')
-        correct_url = f"https://tr.emailfake.com/mail{domain}/{username}"
+        correct_url = f"https://tr.emailfake.com/{domain}/{username}"
         
         session = requests.Session()
         response = session.get(correct_url, timeout=10)
@@ -211,7 +211,7 @@ def test_url(email):
     """URL test endpoint (GET)"""
     try:
         username, domain = email.split('@')
-        correct_url = f"https://tr.emailfake.com/mail{domain}/{username}"
+        correct_url = f"https://tr.emailfake.com/{domain}/{username}"
         
         return jsonify({
             "email": email,
