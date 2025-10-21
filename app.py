@@ -1,14 +1,13 @@
-# 📁 app.py - AKILLI MAIL DİNLEME SİSTEMİ
+# 📁 app.py - DİNAMİK WEBSOCKET BAĞLANTILI SİSTEM
 from flask import Flask, jsonify, request
 import socketio
 import time
 import logging
 import threading
 import requests
-from datetime import datetime, timedelta
+import json
 
 app = Flask(__name__)
-sio = socketio.Client(logger=True, engineio_logger=True)
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -16,129 +15,151 @@ logger = logging.getLogger(__name__)
 
 # 📨 Mail depolama
 email_storage = {}
-websocket_connected = False
-current_monitored_email = None
+active_connections = {}
 
-@sio.event
-def connect():
-    global websocket_connected
-    websocket_connected = True
-    logger.info("✅ ✅ ✅ EMAILFAKE WebSocket'e BAĞLANDI!")
-
-@sio.event
-def connect_error(data):
-    logger.error(f"❌ WebSocket bağlantı hatası: {data}")
-
-@sio.event
-def disconnect():
-    global websocket_connected, current_monitored_email
-    websocket_connected = False
-    current_monitored_email = None
-    logger.error("❌ ❌ ❌ BAĞLANTI KESİLDİ!")
-
-@sio.event
-def new_email(data):
-    """YENİ MAIL GELDİĞİNDE BU FONKSİYON ÇALIŞIR"""
-    global current_monitored_email
-    
-    if current_monitored_email:
-        logger.info(f"🎉 {current_monitored_email} için YENİ MAIL GELDİ!")
+class EmailMonitor:
+    def __init__(self, email_address):
+        self.email_address = email_address
+        self.sio = None
+        self.received_emails = []
+        self.connected = False
+        self.new_email_received = False
+        self.latest_email = None
         
-        # Mail bilgilerini işle
-        email_info = {
-            'id': len(email_storage.get(current_monitored_email, [])) + 1,
-            'from': data.get('from', 'Bilinmiyor'),
-            'subject': data.get('subject', 'Konu Yok'),
-            'date': data.get('date', 'Tarih Yok'),
-            'content': data.get('content', ''),
-            'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'timestamp': time.time()
-        }
+    def connect_and_monitor(self, wait_time=5):
+        """Email adresine özel WebSocket bağlantısı kur ve dinle"""
+        self.sio = socketio.Client(logger=False)
         
-        # Mailleri email adresine göre sakla
-        if current_monitored_email not in email_storage:
-            email_storage[current_monitored_email] = []
+        @self.sio.event
+        def connect():
+            self.connected = True
+            logger.info(f"✅ {self.email_address} WebSocket'e BAĞLANDI!")
+            # Email takibini başlat
+            self.sio.emit("watch_for_my_email", self.email_address)
+            logger.info(f"👂 {self.email_address} dinleniyor...")
         
-        email_storage[current_monitored_email].append(email_info)
+        @self.sio.event
+        def connect_error(data):
+            logger.error(f"❌ {self.email_address} bağlantı hatası: {data}")
+            self.connected = False
         
-        logger.info(f"📧 {current_monitored_email} - GÖNDEREN: {email_info['from']}")
-        logger.info(f"📌 KONU: {email_info['subject']}")
-        logger.info("=" * 50)
+        @self.sio.event
+        def disconnect():
+            logger.info(f"🔌 {self.email_address} bağlantısı kapandı")
+            self.connected = False
+        
+        @self.sio.event
+        def new_email(data):
+            """YENİ MAIL GELDİĞİNDE BU FONKSİYON ÇALIŞIR"""
+            logger.info(f"🎉 {self.email_address} için YENİ MAIL GELDİ!")
+            
+            # Mail bilgilerini işle
+            email_info = {
+                'id': len(self.received_emails) + 1,
+                'from': data.get('from', 'Bilinmiyor'),
+                'subject': data.get('subject', 'Konu Yok'),
+                'date': data.get('date', 'Tarih Yok'),
+                'content': data.get('content', ''),
+                'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'timestamp': time.time()
+            }
+            
+            self.received_emails.append(email_info)
+            self.latest_email = email_info
+            self.new_email_received = True
+            
+            logger.info(f"📧 {self.email_address} - GÖNDEREN: {email_info['from']}")
+            logger.info(f"📌 KONU: {email_info['subject']}")
+        
+        try:
+            # WebSocket bağlantısını kur
+            logger.info(f"🔌 {self.email_address} için WebSocket bağlantısı kuruluyor...")
+            
+            self.sio.connect(
+                "wss://tr.emailfake.com",
+                transports=['websocket', 'polling'],
+                wait_timeout=10
+            )
+            
+            # Bağlantının kurulmasını bekle
+            time.sleep(2)
+            
+            if not self.connected:
+                return {
+                    "status": "error",
+                    "error": "WebSocket bağlantısı kurulamadı",
+                    "email": None
+                }
+            
+            # Önceki son maili kaydet
+            previous_email = self.latest_email
+            
+            # Belirtilen süre boyunca yeni mail bekle
+            logger.info(f"⏳ {self.email_address} için {wait_time} saniye bekleniyor...")
+            
+            start_time = time.time()
+            while time.time() - start_time < wait_time:
+                if self.new_email_received:
+                    break
+                time.sleep(0.1)  # Küçük aralıklarla kontrol et
+            
+            # Bağlantıyı kapat
+            self.sio.disconnect()
+            
+            # Sonucu değerlendir
+            if self.new_email_received and self.latest_email:
+                logger.info(f"🎯 YENİ MAIL BULUNDU: {self.email_address}")
+                return {
+                    "status": "new_email_received",
+                    "email": self.latest_email,
+                    "wait_time": wait_time,
+                    "is_new": True
+                }
+            elif previous_email:
+                logger.info(f"📨 SON MAIL GÖNDERİLİYOR: {self.email_address}")
+                return {
+                    "status": "last_email_sent",
+                    "email": previous_email,
+                    "wait_time": wait_time,
+                    "is_new": False
+                }
+            else:
+                logger.info(f"📭 HİÇ MAIL BULUNAMADI: {self.email_address}")
+                return {
+                    "status": "no_emails_found",
+                    "email": None,
+                    "wait_time": wait_time,
+                    "is_new": False
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ {self.email_address} dinleme hatası: {e}")
+            # Bağlantıyı kapatmayı dene
+            try:
+                if self.sio:
+                    self.sio.disconnect()
+            except:
+                pass
+            return {
+                "status": "error",
+                "error": str(e),
+                "email": None
+            }
 
-def get_last_email(email_address):
-    """Bir email adresinin son mailini getir"""
+def get_previous_emails(email_address):
+    """Önceden alınmış mailleri kontrol et"""
     if email_address in email_storage and email_storage[email_address]:
         return email_storage[email_address][-1]
     return None
-
-def monitor_email_for_duration(email_address, duration=5):
-    """Belirli bir süre boyunca emaili dinle"""
-    global current_monitored_email
-    
-    # Önceki dinlemeyi durdur
-    if current_monitored_email and current_monitored_email != email_address:
-        logger.info(f"🔄 Önceki dinleme durduruldu: {current_monitored_email}")
-    
-    # Yeni emaili dinlemeye başla
-    current_monitored_email = email_address
-    
-    try:
-        # Email takibini başlat
-        sio.emit("watch_for_my_email", email_address)
-        logger.info(f"👂 {email_address} {duration} saniye dinleniyor...")
-        
-        # Son maili kaydet (dinlemeden önceki)
-        last_email_before = get_last_email(email_address)
-        
-        # Belirtilen süre boyunca bekle
-        time.sleep(duration)
-        
-        # Dinleme sonrası son mail
-        last_email_after = get_last_email(email_address)
-        
-        # Eğer yeni mail geldiyse onu döndür, yoksa öncekini döndür
-        if last_email_after and last_email_after != last_email_before:
-            logger.info(f"🎯 YENİ MAIL BULUNDU: {email_address}")
-            return {
-                "status": "new_email_received",
-                "email": last_email_after,
-                "wait_time": duration,
-                "is_new": True
-            }
-        elif last_email_before:
-            logger.info(f"📨 SON MAIL GÖNDERİLİYOR: {email_address}")
-            return {
-                "status": "last_email_sent",
-                "email": last_email_before,
-                "wait_time": duration,
-                "is_new": False
-            }
-        else:
-            logger.info(f"📭 HİÇ MAIL BULUNAMADI: {email_address}")
-            return {
-                "status": "no_emails_found",
-                "email": None,
-                "wait_time": duration,
-                "is_new": False
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Dinleme hatası: {e}")
-        return {
-            "status": "error",
-            "error": str(e),
-            "email": None
-        }
 
 @app.route('/')
 def home():
     """Ana sayfa - sistem durumu"""
     return jsonify({
         "status": "active",
-        "service": "Akıllı EmailFake Monitor",
-        "websocket_connected": websocket_connected,
-        "current_monitored_email": current_monitored_email,
+        "service": "Dinamik EmailFake Monitor",
         "total_tracked_emails": len(email_storage),
+        "active_connections": len(active_connections),
         "uptime": time.time()
     })
 
@@ -146,9 +167,10 @@ def home():
 def get_email():
     """
     AKILLI MAIL ALMA ENDPOINT'I
+    - Her istekte yeni WebSocket bağlantısı
     - 5 saniye yeni mail bekler
     - Yeni mail gelirse onu döndürür
-    - Gelmezse son maili döndürür
+    - Gelmezse önceki maili/sonucu döndürür
     """
     data = request.get_json()
     
@@ -158,18 +180,33 @@ def get_email():
     email_address = data['email']
     wait_time = data.get('wait_time', 5)  # Varsayılan 5 saniye
     
-    # WebSocket bağlı değilse hata ver
-    if not websocket_connected:
-        return jsonify({
-            "status": "error",
-            "error": "WebSocket bağlantısı yok",
-            "email": None
-        }), 503
-    
     logger.info(f"📨 MAIL İSTEĞİ: {email_address} ({wait_time}s bekleme)")
     
+    # Önceki mailleri kontrol et
+    previous_email = get_previous_emails(email_address)
+    
+    # Yeni monitor oluştur ve dinlemeye başla
+    monitor = EmailMonitor(email_address)
+    
+    # Eğer önceki mail varsa, monitor'a aktar
+    if previous_email:
+        monitor.received_emails = email_storage.get(email_address, [])
+        monitor.latest_email = previous_email
+    
     # Emaili dinle ve sonucu al
-    result = monitor_email_for_duration(email_address, wait_time)
+    result = monitor.connect_and_monitor(wait_time)
+    
+    # Sonucu depolaya kaydet
+    if result.get('email'):
+        if email_address not in email_storage:
+            email_storage[email_address] = []
+        
+        # Yeni mailse listeye ekle
+        if result.get('is_new'):
+            email_storage[email_address].append(result['email'])
+        # Önceki maili güncelle
+        else:
+            email_storage[email_address] = [result['email']]
     
     return jsonify(result)
 
@@ -193,64 +230,43 @@ def list_emails(email_address):
 def health():
     """Sağlık kontrolü"""
     return jsonify({
-        "status": "healthy" if websocket_connected else "unhealthy",
-        "websocket_connected": websocket_connected,
-        "current_monitored_email": current_monitored_email,
+        "status": "healthy",
         "timestamp": time.time(),
-        "total_tracked_emails": len(email_storage)
+        "total_tracked_emails": len(email_storage),
+        "total_active_connections": len(active_connections)
     })
 
-def start_websocket():
-    """WebSocket bağlantısını başlat"""
-    max_retries = 10
-    retry_delay = 5
+@app.route('/test', methods=['POST'])
+def test_email():
+    """Test endpoint - gerçek WebSocket olmadan çalışır"""
+    data = request.get_json()
+    email_address = data.get('email', 'test@example.com')
     
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"🔌 WebSocket bağlantısı deneniyor... ({attempt + 1}/{max_retries})")
-            
-            # EMAILFAKE WebSocket'ine bağlan
-            sio.connect(
-                "wss://tr.emailfake.com",
-                transports=['websocket', 'polling'],
-                wait_timeout=10
-            )
-            
-            logger.info("🚀 🚀 🠒 WEB SOCKET BAĞLANTISI BAŞARILI!")
-            break
-            
-        except Exception as e:
-            logger.error(f"❌ Bağlantı hatası ({attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                wait_time = retry_delay
-                logger.info(f"⏳ {wait_time} saniye sonra yeniden deneniyor...")
-                time.sleep(wait_time)
-                retry_delay = min(retry_delay * 1.5, 30)
-    else:
-        logger.error("💥 MAXIMUM RETRY SAYISINA ULAŞILDI! Bağlantı kurulamadı.")
-
-def keep_alive():
-    """Bağlantıyı canlı tut"""
-    while True:
-        if not websocket_connected:
-            logger.warning("🔁 WebSocket bağlantısı kopmuş, yeniden bağlanılıyor...")
-            start_websocket()
-        time.sleep(30)
+    # Test maili oluştur
+    test_email = {
+        'id': 1,
+        'from': 'noreply@test.com',
+        'subject': f'Test Maili - {time.strftime("%H:%M:%S")}',
+        'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'content': 'Bu bir test mailidir',
+        'received_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'timestamp': time.time(),
+        'is_test': True
+    }
+    
+    # Depolamaya kaydet
+    if email_address not in email_storage:
+        email_storage[email_address] = []
+    email_storage[email_address].append(test_email)
+    
+    return jsonify({
+        "status": "test_email_created",
+        "email": test_email,
+        "message": "Test maili oluşturuldu"
+    })
 
 if __name__ == '__main__':
-    # WebSocket bağlantısını başlat
-    logger.info("🚀 Akıllı EmailFake Monitor Başlatılıyor...")
-    
-    # WebSocket i ayrı thread de başlat
-    websocket_thread = threading.Thread(target=start_websocket)
-    websocket_thread.daemon = True
-    websocket_thread.start()
-    
-    # Keep-alive thread i başlat
-    keep_alive_thread = threading.Thread(target=keep_alive)
-    keep_alive_thread.daemon = True
-    keep_alive_thread.start()
-    
     # Flask uygulamasını başlat
+    logger.info("🚀 Dinamik EmailFake Monitor Başlatılıyor...")
     logger.info("🌐 Flask Web Server Başlatılıyor...")
     app.run(host='0.0.0.0', port=10000, debug=False)
