@@ -1,12 +1,12 @@
 {
-  "name": "playwright-tor-project",
+  "name": "playwright-tor-multi-context",
   "version": "1.0.0",
-  "description": "Playwright multi-context with Tor",
+  "description": "Playwright multi-context with Tor, spoofing and per-context IP",
   "type": "module",
-  "dependencies": {
-    "playwright-core": "^1.41.0"
-  },
   "scripts": {
-    "start": "node playwright-multi-context.js"
+    "start": "node playwright-multi-context.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.44.0"
   }
 }
