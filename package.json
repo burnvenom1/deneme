@@ -1,0 +1,2 @@
+npm init -y
+npm i --no-audit --no-fund playwright-core
