@@ -1,2 +1,12 @@
-npm init -y
-npm i --no-audit --no-fund playwright-core
+{
+  "name": "playwright-tor-project",
+  "version": "1.0.0",
+  "description": "Playwright multi-context with Tor",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "^1.41.0"
+  },
+  "scripts": {
+    "start": "node playwright-multi-context.js"
+  }
+}
