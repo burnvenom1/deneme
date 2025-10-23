@@ -1,4 +1,4 @@
-name: Playwright Multi-Context with Tor
+name: Playwright Multi-Context with Tor (robust)
 
 on:
   workflow_dispatch:
@@ -12,9 +12,9 @@ on:
         required: false
         default: 'true'
       START_TIMEOUT:
-        description: 'Tor container başlama bekleme (saniye)'
+        description: 'İlk bekleme süresi (saniye) - ardından readiness loop başlar'
         required: false
-        default: '12'
+        default: '30'
 
 jobs:
   run-playwright:
@@ -38,40 +38,57 @@ jobs:
           set -e
           CONTEXTS=${{ github.event.inputs.CONTEXTS || '3' }}
           BASE=9050
-          START_TIMEOUT=${{ github.event.inputs.START_TIMEOUT || '12' }}
+          START_TIMEOUT=${{ github.event.inputs.START_TIMEOUT || '30' }}
           echo "Starting $CONTEXTS tor containers on ports $BASE..$((BASE+CONTEXTS-1))"
           for i in $(seq 0 $((CONTEXTS-1))); do
             HOST_SOCK=$((BASE + i))
             HOST_CTRL=$((14999 + i))
             NAME="torch_${HOST_SOCK}"
-            echo ">>> starting $NAME (socks:$HOST_SOCK ctrl:$HOST_CTRL)"
+            echo ">>> starting container $NAME (socks:$HOST_SOCK ctrl:$HOST_CTRL)"
             docker pull seevik2580/tor-ip-changer:latest || true
             docker run --rm -d --name "$NAME" -p ${HOST_SOCK}:9050 -p ${HOST_CTRL}:14999 seevik2580/tor-ip-changer:latest
           done
-          echo "Waiting ${START_TIMEOUT}s for Tor containers to initialise..."
+          echo "Waiting initial ${START_TIMEOUT}s for Tor containers to initialise..."
           sleep ${START_TIMEOUT}
-          # quick readiness check per container: try curl via socks5
+
+          # readiness loop: increase retries and print logs on persistent failure
           for i in $(seq 0 $((CONTEXTS-1))); do
             HOST_SOCK=$((BASE + i))
             NAME="torch_${HOST_SOCK}"
-            echo "Checking ${NAME} readiness (curl via socks5)..."
-            RETRIES=10
+            echo "Checking ${NAME} readiness (curl via socks5-hostname 127.0.0.1:${HOST_SOCK})..."
+            RETRIES=30
             OK=0
             while [ $RETRIES -gt 0 ]; do
-              if curl --socks5-hostname 127.0.0.1:${HOST_SOCK} -sS --max-time 10 "https://api.ipify.org?format=json" >/dev/null 2>&1; then
+              if docker run --rm appropriate/curl:latest --socks5-hostname 127.0.0.1:${HOST_SOCK} -sS --max-time 10 "https://api.ipify.org?format=json" >/dev/null 2>&1; then
                 echo "${NAME} socks proxy responded."
                 OK=1
                 break
               fi
-              echo "Waiting ${NAME}..."
+              echo "Waiting ${NAME}... (${RETRIES} retries left)"
               sleep 2
               RETRIES=$((RETRIES-1))
             done
+
             if [ $OK -ne 1 ]; then
-              echo "Warning: ${NAME} may not be responding to SOCKS requests."
+              echo "Warning: ${NAME} may not be responding to SOCKS requests. Dumping last 200 lines of container logs for debug:"
+              docker logs --tail 200 "$NAME" || true
             fi
           done
-          echo "Tor containers started (best-effort)."
+          echo "Tor containers start sequence finished (best-effort)."
+
+      - name: Show repo root (debug)
+        run: |
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          ls -la .
+
+      - name: Verify playwright script exists
+        run: |
+          if [ ! -f ./playwright-multi-context.mjs ]; then
+            echo "ERROR: playwright-multi-context.mjs not found in repo root. Please ensure file is at repository root." >&2
+            ls -la .
+            exit 1
+          fi
+          echo "playwright-multi-context.mjs found."
 
       - name: Run Playwright multi-context script
         env:
@@ -80,8 +97,8 @@ jobs:
           TOR_BASE_PORT: 9050
           CHROME_PATH: /usr/bin/chromium-browser
         run: |
-          echo "Running playwright-multi-context.mjs"
-          node playwright-multi-context.mjs
+          echo "Starting node ./playwright-multi-context.mjs"
+          node ./playwright-multi-context.mjs
 
       - name: Upload screenshots & logs (artifact)
         uses: actions/upload-artifact@v4
