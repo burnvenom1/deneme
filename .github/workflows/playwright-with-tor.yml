@@ -2,30 +2,38 @@ name: Playwright multi-context with Tor
 
 on:
   workflow_dispatch:
+    inputs:
+      CONTEXTS:
+        description: 'Kaç context açılacak'
+        required: false
+        default: '3'
+      HEADLESS:
+        description: 'Tarayıcı headless mi açılsın?'
+        required: false
+        default: 'true'
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      CONTEXTS: 3
       TOR_BASE_PORT: 9050
       CHROME_PATH: /usr/bin/chromium-browser
-      HEADLESS: 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Docker & prerequisites
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq docker.io
-          docker --version
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get update -qq --fix-missing
+          sudo apt-get install -y -qq docker.io curl unzip lsb-release
 
       - name: Start tor-ip-changer containers
         id: start-tor
         run: |
           set -e
-          CONTEXTS=${{ env.CONTEXTS }}
+          CONTEXTS=${{ github.event.inputs.CONTEXTS || 3 }}
           BASE=${{ env.TOR_BASE_PORT }}
           echo "Starting $CONTEXTS tor containers on ports $BASE..$((BASE+CONTEXTS-1))"
           for i in $(seq 0 $((CONTEXTS-1))); do
@@ -36,8 +44,7 @@ jobs:
             docker pull seevik2580/tor-ip-changer:latest || true
             docker run --rm -d --name "$NAME" -p ${HOST_SOCK}:9050 -p ${HOST_CTRL}:14999 seevik2580/tor-ip-changer:latest
           done
-          # Tor startup wait
-          echo "Waiting for Tor containers to initialise..."
+          echo "Waiting 12s for Tor containers to initialise..."
           sleep 12
           echo "Tor containers started."
 
@@ -53,10 +60,10 @@ jobs:
 
       - name: Run Playwright multi-context script
         env:
-          CONTEXTS: ${{ env.CONTEXTS }}
+          CONTEXTS: ${{ github.event.inputs.CONTEXTS || 3 }}
           TOR_BASE_PORT: ${{ env.TOR_BASE_PORT }}
           CHROME_PATH: ${{ env.CHROME_PATH }}
-          HEADLESS: ${{ env.HEADLESS }}
+          HEADLESS: ${{ github.event.inputs.HEADLESS || 'true' }}
           API_BASE_URL: ${{ secrets.API_BASE_URL || '' }}
           API_TOKEN: ${{ secrets.API_TOKEN || '' }}
         run: |
@@ -67,7 +74,7 @@ jobs:
         run: |
           set -e || true
           BASE=${{ env.TOR_BASE_PORT }}
-          CONTEXTS=${{ env.CONTEXTS }}
+          CONTEXTS=${{ github.event.inputs.CONTEXTS || 3 }}
           for i in $(seq 0 $((CONTEXTS-1))); do
             HOST_SOCK=$((BASE + i))
             NAME="torch_${HOST_SOCK}"
