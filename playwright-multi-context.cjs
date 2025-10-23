@@ -1,9 +1,16 @@
-// playwright-multi-context.mjs
-import fs from 'fs';
-import path from 'path';
-import { chromium, request as playwrightRequest } from 'playwright-core';
-import { randomUUID } from 'crypto';
-import { getWebGLSpoofScript, getCanvasSpoofScript, getAudioContextSpoofScript, getHardwareInfoSpoofScript, getWebdriverSpoofScript, getPluginAndPermissionsSpoofScript } from './spoofing-scripts.mjs';
+// playwright-multi-context.cjs
+const fs = require('fs');
+const path = require('path');
+const { chromium, request: playwrightRequest } = require('playwright-core');
+const { randomUUID } = require('crypto');
+const {
+  getWebGLSpoofScript,
+  getCanvasSpoofScript,
+  getAudioContextSpoofScript,
+  getHardwareInfoSpoofScript,
+  getWebdriverSpoofScript,
+  getPluginAndPermissionsSpoofScript
+} = require('./spoofing-scripts.cjs');
 
 const LOGS_DIR = 'logs';
 const SCREENSHOTS_DIR = 'screenshots';
@@ -11,7 +18,8 @@ if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
 
 const logFile = path.join(LOGS_DIR, 'run.log');
-function log(...args) {
+function log() {
+  const args = Array.from(arguments);
   const line = `[${new Date().toISOString()}] ${args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`;
   console.log(line);
   try { fs.appendFileSync(logFile, line + '\n'); } catch (e) {}
@@ -66,7 +74,6 @@ async function postResultToApi(taskId, result) {
   } finally { await req.dispose(); }
 }
 
-// try multiple possible chromium paths
 function findChromium() {
   const candidates = [CHROME_PATH, '/usr/bin/chromium-browser', '/usr/bin/chromium', '/snap/bin/chromium'];
   for (const p of candidates) {
@@ -77,7 +84,7 @@ function findChromium() {
 }
 
 (async () => {
-  log('START playwright-multi-context');
+  log('START playwright-multi-context (CJS)');
   log('CONFIG', { CONTEXTS, TOR_BASE_PORT, CHROME_PATH, HEADLESS, API_BASE: !!API_BASE });
 
   const proxies = buildProxyList();
@@ -85,7 +92,7 @@ function findChromium() {
 
   const browserExec = findChromium();
   if (!browserExec) {
-    log('Warning: Could not locate chromium executable on runner. Playwright may still use an installed browser; if launch fails consider using a runner with chromium or adjust CHROME_PATH.');
+    log('Warning: Could not locate chromium executable on runner. Playwright may still use an installed browser; if launch fails consider adjusting CHROME_PATH.');
   } else {
     log('Chromium executable path:', browserExec);
   }
@@ -167,13 +174,11 @@ function findChromium() {
           });
           const visibleIP = ipInfo && ipInfo.ip ? ipInfo.ip : `error:${ipInfo && ipInfo.error ? ipInfo.error : 'unknown'}`;
           log(`Worker[${idx}] visible IP: ${visibleIP}`);
-          // append to CSV
           fs.appendFileSync(path.join(LOGS_DIR, 'ips.csv'), `${task.id},${idx},${visibleIP},${new Date().toISOString()}\n`);
         } catch (e) {
           log(`Worker[${idx}] ip fetch failed: ${e && e.message}`);
         }
 
-        // fill fields (if provided)
         if (Array.isArray(task.fields)) {
           for (const f of task.fields) {
             try {
@@ -186,7 +191,6 @@ function findChromium() {
           }
         }
 
-        // clicks
         if (Array.isArray(task.clicks)) {
           for (const sel of task.clicks) {
             try {
@@ -199,12 +203,10 @@ function findChromium() {
           }
         }
 
-        // screenshot
         const fname = `${SCREENSHOTS_DIR}/screenshot-${task.id || 't'+idx}-${Date.now()}.png`;
         await page.screenshot({ path: fname }).catch(e => log('screenshot fail', e && e.message));
         log(`Worker[${idx}] screenshot saved: ${fname}`);
 
-        // optionally post result to API
         const result = { status: 'done', screenshot: fname, timestamp: new Date().toISOString() };
         if (API_BASE && API_TOKEN) {
           try { await retry(() => postResultToApi(task.id || ('t'+idx), result), 3); log(`Worker[${idx}] result posted`); }
