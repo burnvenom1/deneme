@@ -1,19 +1,28 @@
 // playwright-multi-context.js
 // Node 18+/20+
-// Install: npm i --no-audit --no-fund playwright-core
-// Usage in GH Action: env provided by workflow. Locally: CONTEXTS=3 TOR_BASE_PORT=9050 node playwright-multi-context.js
+// Dependencies: playwright-core
+// Usage: CONTEXTS=3 TOR_BASE_PORT=9050 CHROME_PATH=/usr/bin/chromium-browser HEADLESS=true node playwright-multi-context.js
 
+const fs = require('fs');
 const { chromium, request: playwrightRequest } = require('playwright-core');
 const { randomUUID } = require('crypto');
 
+const LOG_FILE = 'run.log';
+function log(...args) {
+  const line = `[${new Date().toISOString()}] ${args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`;
+  console.log(line);
+  try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) {}
+}
+
+// --- Config from env ---
 const CONTEXTS = process.env.CONTEXTS ? Math.max(1, parseInt(process.env.CONTEXTS, 10)) : 3;
-const PROXY_LIST = process.env.PROXY_LIST ? process.env.PROXY_LIST.split(',').map(s => s.trim()).filter(Boolean) : null;
 const TOR_BASE_PORT = process.env.TOR_BASE_PORT ? parseInt(process.env.TOR_BASE_PORT, 10) : 9050;
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/chromium-browser';
 const HEADLESS = (typeof process.env.HEADLESS === 'undefined') ? true : (String(process.env.HEADLESS).toLowerCase() !== 'false');
 const API_BASE = process.env.API_BASE_URL || null;
 const API_TOKEN = process.env.API_TOKEN || null;
 
+// --- Helpers ---
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function getBackoff(attempt, base = 500, max = 15000) {
   const cap = Math.min(max, base * Math.pow(2, attempt));
@@ -24,14 +33,14 @@ async function retry(fn, attempts = 4) {
     try { return await fn(); }
     catch (err) {
       const wait = getBackoff(i);
-      console.log(`Retry ${i+1}/${attempts} after error: ${err && err.message ? err.message : err}. waiting ${wait}ms`);
+      log(`Retry ${i+1}/${attempts} after error: ${err && err.message ? err.message : err}. waiting ${wait}ms`);
       await sleep(wait);
     }
   }
   throw new Error('Max retries reached');
 }
 
-/** ---------- Spoofing script builders (string returns) ---------- **/
+// --- Spoofing scripts (kept deterministic per-seed) ---
 function getWebGLSpoofScript(sessionSeed) {
   const gpuPairs = [
     { vendor: 'Intel Inc.', renderers: ['Intel Iris Xe Graphics','Intel UHD Graphics 770','Intel Iris Plus Graphics 655']},
@@ -181,11 +190,8 @@ function getPluginAndPermissionsSpoofScript() {
   `;
 }
 
-/** ---------- helper: prepare proxy list ---------- **/
+// --- Build proxy list from TOR_BASE_PORT + CONTEXTS ---
 function buildProxyList() {
-  if (PROXY_LIST && PROXY_LIST.length > 0) {
-    return PROXY_LIST;
-  }
   const arr = [];
   for (let i = 0; i < CONTEXTS; i++) {
     arr.push(`socks5://127.0.0.1:${TOR_BASE_PORT + i}`);
@@ -193,7 +199,7 @@ function buildProxyList() {
   return arr;
 }
 
-/** ---------- optional API helpers (tasks/results) ---------- **/
+// --- Optional API helpers (if you use task API) ---
 async function fetchTasksFromApi() {
   if (!API_BASE || !API_TOKEN) return null;
   const req = await playwrightRequest.newContext({
@@ -225,44 +231,54 @@ async function postResultToApi(taskId, result) {
   }
 }
 
-/** ---------- main logic ---------- **/
+// --- Main execution ---
 (async () => {
-  console.log('CONFIG:', { CONTEXTS, proxiesFromEnv: !!PROXY_LIST, TOR_BASE_PORT, CHROME_PATH, HEADLESS });
+  log('START: playwright-multi-context.js');
+  log('CONFIG', { CONTEXTS, TOR_BASE_PORT, CHROME_PATH, HEADLESS, API_BASE: !!API_BASE });
 
   const proxies = buildProxyList();
-  console.log('Using proxies (first N):', proxies.slice(0, CONTEXTS));
+  log('Proxies to use:', proxies);
 
-  const browser = await chromium.launch({
-    headless: HEADLESS,
-    executablePath: CHROME_PATH,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--lang=tr-TR',
-      '--timezone=Europe/Istanbul',
-      '--disable-web-security',
-      '--disable-extensions',
-      '--disable-popup-blocking',
-      '--disable-default-apps',
-      '--disable-infobars',
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage'
-    ],
-    timeout: 30000
-  });
+  // Try to launch browser using provided CHROME_PATH (runner chrome) - no download
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: HEADLESS,
+      executablePath: CHROME_PATH,
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--lang=tr-TR',
+        '--timezone=Europe/Istanbul',
+        '--disable-web-security',
+        '--disable-extensions',
+        '--disable-popup-blocking',
+        '--disable-default-apps',
+        '--disable-infobars',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage'
+      ],
+      timeout: 45000
+    });
+  } catch (e) {
+    log('Browser launch failed:', e && e.message ? e.message : e);
+    process.exit(2);
+  }
 
   try {
-    const tasks = await (API_BASE && API_TOKEN ? retry(fetchTasksFromApi, 3).catch(()=>null) : null);
-    const workItems = Array.isArray(tasks) && tasks.length ? tasks : [
+    // fetch tasks if API configured
+    const tasksFromApi = await (API_BASE && API_TOKEN ? retry(fetchTasksFromApi, 3).catch(err => { log('fetchTasksFromApi failed', err && err.message); return null; }) : null);
+    const workItems = Array.isArray(tasksFromApi) && tasksFromApi.length ? tasksFromApi : [
       { id: 'demo-1', url: 'https://giris.hepsiburada.com/?ReturnUrl=https%3A%2F%2Foauth.hepsiburada.com%2Fconnect%2Fauthorize%2Fcallback%3Fclient_id%3DSPA%26redirect_uri%3Dhttps%253A%252F%252Fwww.hepsiburada.com%252Fuyelik%252Fcallback%26response_type%3Dcode%26scope%3Dopenid%2520profile%26state%3D7cb8bd4eeed54ce590c3ade08f4ae1ca%26code_challenge%3DyoQ0DpRXUGYGRQyvQL7U42EelI35-Od97R3LFWFkUUk%26code_challenge_method%3DS256%26response_mode%3Dquery%26ActivePage%3DSIGN_UP%26oidcReturnUrl%3Dhttps%253A%252F%252Fwww.hepsiburada.com%252F', fields: [], clicks: [], successSelector: null }
     ];
 
     const toProcess = workItems.slice(0, CONTEXTS);
+    log('Work items to process count:', toProcess.length);
 
     const workers = toProcess.map((task, idx) => (async () => {
       const proxy = proxies[idx] || null;
       const seed = randomUUID().slice(0,8) + '-' + idx;
-      console.log(`Worker[${idx}] task:${task.id} proxy:${proxy} seed:${seed}`);
+      log(`Worker[${idx}] starting task ${task.id}`, { proxy, seed });
 
       const ctxOptions = {
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -276,6 +292,7 @@ async function postResultToApi(taskId, result) {
 
       const context = await browser.newContext(ctxOptions);
 
+      // Inject spoofing scripts
       await context.addInitScript(getWebGLSpoofScript(seed));
       await context.addInitScript(getHardwareInfoSpoofScript(seed));
       await context.addInitScript(getWebdriverSpoofScript());
@@ -283,6 +300,7 @@ async function postResultToApi(taskId, result) {
       await context.addInitScript(getAudioContextSpoofScript(seed));
       await context.addInitScript(getPluginAndPermissionsSpoofScript());
 
+      // New page and block heavy resources
       const page = await context.newPage();
       await page.route('**/*', route => {
         const t = route.request().resourceType();
@@ -292,65 +310,77 @@ async function postResultToApi(taskId, result) {
 
       try {
         await retry(() => page.goto(task.url, { waitUntil: 'domcontentloaded', timeout: 30000 }), 4);
+        log(`Worker[${idx}] navigated ${task.url}`);
 
+        // fill fields if provided
         if (Array.isArray(task.fields)) {
           for (const f of task.fields) {
             try {
               await page.waitForSelector(f.selector, { timeout: 4000 });
               await page.fill(f.selector, f.value);
+              log(`Worker[${idx}] filled ${f.selector}`);
             } catch (e) {
-              console.log(`Worker[${idx}] field ${f.selector} not found: ${e.message}`);
+              log(`Worker[${idx}] field ${f.selector} not found: ${e && e.message}`);
             }
           }
         }
 
+        // clicks
         if (Array.isArray(task.clicks)) {
           for (const sel of task.clicks) {
             try {
               await page.waitForSelector(sel, { timeout: 4000 });
               await Promise.all([ page.click(sel), page.waitForTimeout(400) ]);
+              log(`Worker[${idx}] clicked ${sel}`);
             } catch (e) {
-              console.log(`Worker[${idx}] click ${sel} failed: ${e.message}`);
+              log(`Worker[${idx}] click ${sel} failed: ${e && e.message}`);
             }
           }
         }
 
+        // optional success selector read
         let successText = null;
         if (task.successSelector) {
           try {
             await page.waitForSelector(task.successSelector, { timeout: 8000 });
             successText = await page.$eval(task.successSelector, el => el.textContent.trim());
+            log(`Worker[${idx}] successSelector found: ${successText}`);
           } catch (e) {
-            console.log(`Worker[${idx}] successSelector not found`);
+            log(`Worker[${idx}] successSelector not found`);
           }
         }
 
         const fname = `screenshot-${task.id || 't'+idx}-${Date.now()}.png`;
-        await page.screenshot({ path: fname }).catch(()=>{});
-        console.log(`Worker[${idx}] screenshot saved: ${fname}`);
+        await page.screenshot({ path: fname }).catch(e => log('screenshot failed', e && e.message));
+        log(`Worker[${idx}] screenshot saved: ${fname}`);
 
         const result = { status: successText ? 'ok' : 'maybe', successText, screenshot: fname, timestamp: new Date().toISOString() };
         if (API_BASE && API_TOKEN) {
-          await retry(() => postResultToApi(task.id || ('t'+idx), result), 3).catch(e => console.log('post result failed', e.message));
+          try { await retry(() => postResultToApi(task.id || ('t'+idx), result), 3); log(`Worker[${idx}] result posted`); }
+          catch (e) { log(`Worker[${idx}] post result failed: ${e && e.message}`); }
         } else {
-          console.log('Result (no API):', result);
+          log(`Worker[${idx}] result:`, result);
         }
 
       } catch (err) {
-        console.error(`Worker[${idx}] fatal:`, err && err.message ? err.message : err);
+        log(`Worker[${idx}] fatal error:`, err && err.message ? err.message : err);
         const result = { status: 'error', error: err && err.message ? err.message : String(err), timestamp: new Date().toISOString() };
-        if (API_BASE && API_TOKEN) await postResultToApi(task.id || ('t'+idx), result).catch(()=>{});
+        if (API_BASE && API_TOKEN) await postResultToApi(task.id || ('t'+idx), result).catch(e => log('post error', e && e.message));
       } finally {
-        try { await context.close(); } catch(_) {}
+        try { await context.close(); } catch (e) { log('context close error', e && e.message); }
       }
     })());
 
+    // Execute workers with Promise.all (parallel up to CONTEXTS)
     await Promise.all(workers);
 
-    console.log('All workers finished.');
+    log('All workers finished.');
     await browser.close();
+    log('Browser closed. Exiting normally.');
+    process.exit(0);
+
   } catch (e) {
-    console.error('Main fatal error:', e && e.message ? e.message : e);
+    log('Main fatal error:', e && e.message ? e.message : e);
     try { await browser.close(); } catch(_) {}
     process.exit(1);
   }
