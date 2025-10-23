@@ -1,8 +1,5 @@
-// spoofing-scripts.mjs
-// Exports: getWebGLSpoofScript, getCanvasSpoofScript, getAudioContextSpoofScript,
-// getHardwareInfoSpoofScript, getWebdriverSpoofScript, getPluginAndPermissionsSpoofScript
-
-export function getWebGLSpoofScript(sessionSeed) {
+// spoofing-scripts.cjs
+function getWebGLSpoofScript(sessionSeed) {
   const gpuPairs = [
     { vendor: 'Intel Inc.', renderers: ['Intel Iris Xe Graphics','Intel UHD Graphics 770','Intel Iris Plus Graphics 655']},
     { vendor: 'NVIDIA Corporation', renderers: ['NVIDIA GeForce RTX 4050/PCIe/SSE2','NVIDIA GeForce RTX 4090/PCIe/SSE2','NVIDIA GeForce RTX 4080/PCIe/SSE2','NVIDIA GeForce RTX 4070 Ti/PCIe/SSE2']},
@@ -28,7 +25,7 @@ export function getWebGLSpoofScript(sessionSeed) {
   `;
 }
 
-export function getCanvasSpoofScript(sessionSeed) {
+function getCanvasSpoofScript(sessionSeed) {
   return `
     (() => {
       const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
@@ -53,7 +50,7 @@ export function getCanvasSpoofScript(sessionSeed) {
   `;
 }
 
-export function getAudioContextSpoofScript(sessionSeed) {
+function getAudioContextSpoofScript(sessionSeed) {
   return `
     (() => {
       const domain = location.hostname;
@@ -91,7 +88,7 @@ export function getAudioContextSpoofScript(sessionSeed) {
   `;
 }
 
-export function getHardwareInfoSpoofScript(sessionSeed) {
+function getHardwareInfoSpoofScript(sessionSeed) {
   const platforms = ['Win32','Linux x86_64','MacIntel','Win64','Linux aarch64'];
   const concurrencies = [2,4,8];
   const memories = [4,8,16];
@@ -112,7 +109,7 @@ export function getHardwareInfoSpoofScript(sessionSeed) {
   `;
 }
 
-export function getWebdriverSpoofScript() {
+function getWebdriverSpoofScript() {
   return `
     (() => {
       try {
@@ -126,7 +123,7 @@ export function getWebdriverSpoofScript() {
   `;
 }
 
-export function getPluginAndPermissionsSpoofScript() {
+function getPluginAndPermissionsSpoofScript() {
   return `
     (() => {
       try {
@@ -150,3 +147,12 @@ export function getPluginAndPermissionsSpoofScript() {
     })();
   `;
 }
+
+module.exports = {
+  getWebGLSpoofScript,
+  getCanvasSpoofScript,
+  getAudioContextSpoofScript,
+  getHardwareInfoSpoofScript,
+  getWebdriverSpoofScript,
+  getPluginAndPermissionsSpoofScript
+};
