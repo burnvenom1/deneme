@@ -1,122 +1,97 @@
-name: Playwright Multi-Context with Tor (robust)
+name: Playwright with Tor
 
 on:
   workflow_dispatch:
     inputs:
       CONTEXTS:
-        description: 'Kaç context açılacak'
+        description: 'Number of parallel contexts'
         required: false
         default: '3'
       HEADLESS:
-        description: 'Tarayıcı headless mi açılsın? (true/false)'
+        description: 'Run browser in headless mode'
         required: false
         default: 'true'
-      START_TIMEOUT:
-        description: 'İlk bekleme süresi (saniye) - ardından readiness loop başlar'
-        required: false
-        default: '30'
 
 jobs:
   run-playwright:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v3
         with:
           node-version: 20
 
-      - name: Install runtime deps (no lockfile required)
+      - name: Install dependencies
         run: |
-          npm install --no-audit --no-fund
+          npm ci || npm install --no-audit --no-fund
 
-      - name: Start tor-ip-changer containers (host docker)
-        id: start-tor
+      - name: Start TOR containers
         run: |
           set -e
+          TOR_BASE_PORT=9050
           CONTEXTS=${{ github.event.inputs.CONTEXTS || '3' }}
-          BASE=9050
-          START_TIMEOUT=${{ github.event.inputs.START_TIMEOUT || '30' }}
-          echo "Starting $CONTEXTS tor containers on ports $BASE..$((BASE+CONTEXTS-1))"
           for i in $(seq 0 $((CONTEXTS-1))); do
-            HOST_SOCK=$((BASE + i))
-            HOST_CTRL=$((14999 + i))
-            NAME="torch_${HOST_SOCK}"
-            echo ">>> starting container $NAME (socks:$HOST_SOCK ctrl:$HOST_CTRL)"
-            docker pull seevik2580/tor-ip-changer:latest || true
-            docker run --rm -d --name "$NAME" -p ${HOST_SOCK}:9050 -p ${HOST_CTRL}:14999 seevik2580/tor-ip-changer:latest
+            port=$((TOR_BASE_PORT + i))
+            container_name="torch_${port}"
+            docker run -d --rm --name $container_name -p $port:9050 dperson/torproxy socks
+            echo "Started TOR container $container_name on port $port"
           done
-          echo "Waiting initial ${START_TIMEOUT}s for Tor containers to initialise..."
-          sleep ${START_TIMEOUT}
 
-          # readiness loop: increase retries and print logs on persistent failure
+      - name: Wait for TOR readiness
+        run: |
+          TOR_BASE_PORT=9050
+          CONTEXTS=${{ github.event.inputs.CONTEXTS || '3' }}
           for i in $(seq 0 $((CONTEXTS-1))); do
-            HOST_SOCK=$((BASE + i))
-            NAME="torch_${HOST_SOCK}"
-            echo "Checking ${NAME} readiness (curl via socks5-hostname 127.0.0.1:${HOST_SOCK})..."
-            RETRIES=30
-            OK=0
-            while [ $RETRIES -gt 0 ]; do
-              if docker run --rm appropriate/curl:latest --socks5-hostname 127.0.0.1:${HOST_SOCK} -sS --max-time 10 "https://api.ipify.org?format=json" >/dev/null 2>&1; then
-                echo "${NAME} socks proxy responded."
-                OK=1
+            port=$((TOR_BASE_PORT + i))
+            container_name="torch_${port}"
+            ready=0
+            for attempt in {1..15}; do
+              if curl --socks5 127.0.0.1:$port -s https://check.torproject.org >/dev/null 2>&1; then
+                ready=1
+                echo "$container_name ready"
                 break
+              else
+                echo "Waiting $container_name..."
+                sleep 2
               fi
-              echo "Waiting ${NAME}... (${RETRIES} retries left)"
-              sleep 2
-              RETRIES=$((RETRIES-1))
             done
-
-            if [ $OK -ne 1 ]; then
-              echo "Warning: ${NAME} may not be responding to SOCKS requests. Dumping last 200 lines of container logs for debug:"
-              docker logs --tail 200 "$NAME" || true
+            if [ $ready -eq 0 ]; then
+              echo "Warning: $container_name may not be responding to SOCKS requests."
             fi
           done
-          echo "Tor containers start sequence finished (best-effort)."
+          echo "Tor containers started (best-effort)."
 
-      - name: Show repo root (debug)
+      - name: Verify playwright script exists (.cjs)
         run: |
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          ls -la .
-
-      - name: Verify playwright script exists
-        run: |
-          if [ ! -f ./playwright-multi-context.mjs ]; then
-            echo "ERROR: playwright-multi-context.mjs not found in repo root. Please ensure file is at repository root." >&2
+          if [ ! -f ./playwright-multi-context.cjs ]; then
+            echo "ERROR: playwright-multi-context.cjs not found in repo root. Please ensure file is at repository root." >&2
             ls -la .
             exit 1
           fi
-          echo "playwright-multi-context.mjs found."
+          echo "playwright-multi-context.cjs found."
 
-      - name: Run Playwright multi-context script
+      - name: Run Playwright multi-context script (.cjs)
         env:
           CONTEXTS: ${{ github.event.inputs.CONTEXTS || '3' }}
           HEADLESS: ${{ github.event.inputs.HEADLESS || 'true' }}
           TOR_BASE_PORT: 9050
           CHROME_PATH: /usr/bin/chromium-browser
         run: |
-          echo "Starting node ./playwright-multi-context.mjs"
-          node ./playwright-multi-context.mjs
+          echo "Starting node ./playwright-multi-context.cjs"
+          node ./playwright-multi-context.cjs
 
-      - name: Upload screenshots & logs (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots-and-logs
-          path: |
-            screenshots/**
-            logs/**
-
-      - name: Stop tor-ip-changer containers (cleanup)
+      - name: Stop TOR containers
         if: always()
         run: |
-          set -e || true
+          TOR_BASE_PORT=9050
           CONTEXTS=${{ github.event.inputs.CONTEXTS || '3' }}
-          BASE=9050
-          echo "Stopping tor containers..."
           for i in $(seq 0 $((CONTEXTS-1))); do
-            HOST_SOCK=$((BASE + i))
-            NAME="torch_${HOST_SOCK}"
-            docker ps -q --filter "name=$NAME" | grep -q . && (echo "Stopping $NAME" && docker stop $NAME) || echo "$NAME not running"
+            port=$((TOR_BASE_PORT + i))
+            container_name="torch_${port}"
+            docker stop $container_name || true
+            echo "Stopped $container_name"
           done
