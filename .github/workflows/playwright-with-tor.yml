@@ -1,4 +1,4 @@
-name: Playwright multi-context with Tor
+name: Playwright multi-context with Tor (Docker host + containerized Node)
 
 on:
   workflow_dispatch:
@@ -8,69 +8,13 @@ on:
         required: false
         default: '3'
       HEADLESS:
-        description: 'Tarayıcı headless mi açılsın?'
+        description: 'Tarayıcı headless mi açılsın? (true/false)'
         required: false
         default: 'true'
-
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    env:
-      TOR_BASE_PORT: 9050
-      CHROME_PATH: /usr/bin/chromium-browser
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Docker & prerequisites
-        run: |
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo apt-get update -qq --fix-missing
-          sudo apt-get install -y -qq docker.io curl unzip lsb-release
-
-      - name: Start tor-ip-changer containers
-        id: start-tor
-        run: |
-          set -e
-          CONTEXTS=${{ github.event.inputs.CONTEXTS || 3 }}
-          BASE=${{ env.TOR_BASE_PORT }}
-          echo "Starting $CONTEXTS tor containers on ports $BASE..$((BASE+CONTEXTS-1))"
-          for i in $(seq 0 $((CONTEXTS-1))); do
-            HOST_SOCK=$((BASE + i))
-            HOST_CTRL=$((14999 + i))
-            NAME="torch_${HOST_SOCK}"
-            echo "Starting container $NAME (socks:$HOST_SOCK ctrl:$HOST_CTRL)"
-            docker pull seevik2580/tor-ip-changer:latest || true
-            docker run --rm -d --name "$NAME" -p ${HOST_SOCK}:9050 -p ${HOST_CTRL}:14999 seevik2580/tor-ip-changer:latest
-          done
-          echo "Waiting 12s for Tor containers to initialise..."
-          sleep 12
-          echo "Tor containers started."
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: |
-          npm ci || true
-          npm i --no-audit --no-fund playwright-core
-
-      name: Playwright multi-context with Tor (Dockerized)
-
-on:
-  workflow_dispatch:
-    inputs:
-      CONTEXTS:
-        description: 'Kaç context açılacak'
+      TIMEOUT:
+        description: 'Tor container başlangıç bekleme süresi (saniye)'
         required: false
-        default: '3'
-      HEADLESS:
-        description: 'Tarayıcı headless mi açılsın?'
-        required: false
-        default: 'true'
+        default: '12'
 
 jobs:
   run:
@@ -80,17 +24,87 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run in Docker (Node + Playwright)
+      - name: Start tor-ip-changer containers (host docker)
+        id: start-tor
         run: |
-          CONTEXTS=${{ github.event.inputs.CONTEXTS || 3 }}
-          HEADLESS=${{ github.event.inputs.HEADLESS || 'true' }}
-          
-          # Docker image: Node + Playwright preinstalled
-          docker run --rm -v $PWD:/workspace -w /workspace \
+          set -e
+          CONTEXTS=${{ github.event.inputs.CONTEXTS || '3' }}
+          BASE=9050
+          TIMEOUT=${{ github.event.inputs.TIMEOUT || '12' }}
+          echo "Starting $CONTEXTS tor containers on ports $BASE..$((BASE+CONTEXTS-1))"
+          for i in $(seq 0 $((CONTEXTS-1))); do
+            HOST_SOCK=$((BASE + i))
+            HOST_CTRL=$((14999 + i))
+            NAME="torch_${HOST_SOCK}"
+            echo ">>> starting container $NAME (socks:$HOST_SOCK ctrl:$HOST_CTRL)"
+            docker pull seevik2580/tor-ip-changer:latest || true
+            docker run --rm -d --name "$NAME" -p ${HOST_SOCK}:9050 -p ${HOST_CTRL}:14999 seevik2580/tor-ip-changer:latest
+          done
+          echo "Waiting $TIMEOUT seconds for Tor containers to initialise..."
+          sleep $TIMEOUT
+
+          # Kontrol: Her container hazır mı?
+          for i in $(seq 0 $((CONTEXTS-1))); do
+            HOST_SOCK=$((BASE + i))
+            NAME="torch_${HOST_SOCK}"
+            RETRIES=12
+            while ! docker exec "$NAME" curl -s --socks5 127.0.0.1:9050 http://check.torproject.org >/dev/null 2>&1; do
+              echo "Waiting for $NAME to become ready..."
+              sleep 2
+              RETRIES=$((RETRIES-1))
+              if [ $RETRIES -le 0 ]; then
+                echo "Warning: $NAME may not be ready!"
+                break
+              fi
+            done
+          done
+          echo "Tor containers started and ready."
+
+      - name: Run Node + Playwright inside Docker (containerized)
+        id: run-node
+        env:
+          CONTEXTS: ${{ github.event.inputs.CONTEXTS || '3' }}
+          HEADLESS: ${{ github.event.inputs.HEADLESS || 'true' }}
+          TOR_BASE_PORT: 9050
+          CHROME_PATH: /usr/bin/chromium-browser
+          API_BASE_URL: ${{ secrets.API_BASE_URL || '' }}
+          API_TOKEN: ${{ secrets.API_TOKEN || '' }}
+        run: |
+          echo "Running Node (playwright-multi-context.js) inside docker container..."
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace \
+            -w /workspace \
             -e CONTEXTS="$CONTEXTS" \
             -e HEADLESS="$HEADLESS" \
-            -e TOR_BASE_PORT=9050 \
-            node:20-bullseye bash -c "\
+            -e TOR_BASE_PORT="$TOR_BASE_PORT" \
+            -e CHROME_PATH="$CHROME_PATH" \
+            -e API_BASE_URL="$API_BASE_URL" \
+            -e API_TOKEN="$API_TOKEN" \
+            node:20-bullseye bash -lc "\
+              npm ci || true && \
               npm i --no-audit --no-fund playwright-core && \
               node playwright-multi-context.js \
             "
+
+      - name: Upload screenshots & logs (artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-and-logs
+          path: |
+            screenshot-*.png
+            **/screenshot-*.png
+            *.log
+            **/*.log
+
+      - name: Stop tor-ip-changer containers (cleanup)
+        if: always()
+        run: |
+          set -e || true
+          CONTEXTS=${{ github.event.inputs.CONTEXTS || '3' }}
+          BASE=9050
+          echo "Stopping tor containers..."
+          for i in $(seq 0 $((CONTEXTS-1))); do
+            HOST_SOCK=$((BASE + i))
+            NAME="torch_${HOST_SOCK}"
+            docker ps -q --filter "name=$NAME" | grep -q . && (echo "Stopping $NAME" && docker stop $NAME) || echo "$NAME not running"
+          done
