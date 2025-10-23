@@ -1,0 +1,76 @@
+name: Playwright multi-context with Tor
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      CONTEXTS: 3
+      TOR_BASE_PORT: 9050
+      CHROME_PATH: /usr/bin/chromium-browser
+      HEADLESS: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Docker & prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq docker.io
+          docker --version
+
+      - name: Start tor-ip-changer containers
+        id: start-tor
+        run: |
+          set -e
+          CONTEXTS=${{ env.CONTEXTS }}
+          BASE=${{ env.TOR_BASE_PORT }}
+          echo "Starting $CONTEXTS tor containers on ports $BASE..$((BASE+CONTEXTS-1))"
+          for i in $(seq 0 $((CONTEXTS-1))); do
+            HOST_SOCK=$((BASE + i))
+            HOST_CTRL=$((14999 + i))
+            NAME="torch_${HOST_SOCK}"
+            echo "Starting container $NAME (socks:$HOST_SOCK ctrl:$HOST_CTRL)"
+            docker pull seevik2580/tor-ip-changer:latest || true
+            docker run --rm -d --name "$NAME" -p ${HOST_SOCK}:9050 -p ${HOST_CTRL}:14999 seevik2580/tor-ip-changer:latest
+          done
+          # Tor startup wait
+          echo "Waiting for Tor containers to initialise..."
+          sleep 12
+          echo "Tor containers started."
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm ci || true
+          npm i --no-audit --no-fund playwright-core
+
+      - name: Run Playwright multi-context script
+        env:
+          CONTEXTS: ${{ env.CONTEXTS }}
+          TOR_BASE_PORT: ${{ env.TOR_BASE_PORT }}
+          CHROME_PATH: ${{ env.CHROME_PATH }}
+          HEADLESS: ${{ env.HEADLESS }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL || '' }}
+          API_TOKEN: ${{ secrets.API_TOKEN || '' }}
+        run: |
+          node playwright-multi-context.js
+
+      - name: Stop tor-ip-changer containers (cleanup)
+        if: always()
+        run: |
+          set -e || true
+          BASE=${{ env.TOR_BASE_PORT }}
+          CONTEXTS=${{ env.CONTEXTS }}
+          for i in $(seq 0 $((CONTEXTS-1))); do
+            HOST_SOCK=$((BASE + i))
+            NAME="torch_${HOST_SOCK}"
+            echo "Stopping $NAME if exists"
+            docker ps -q --filter "name=$NAME" | grep -q . && docker stop $NAME || true
+          done
