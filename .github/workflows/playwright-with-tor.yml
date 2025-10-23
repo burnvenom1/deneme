@@ -58,26 +58,39 @@ jobs:
           npm ci || true
           npm i --no-audit --no-fund playwright-core
 
-      - name: Run Playwright multi-context script
-        env:
-          CONTEXTS: ${{ github.event.inputs.CONTEXTS || 3 }}
-          TOR_BASE_PORT: ${{ env.TOR_BASE_PORT }}
-          CHROME_PATH: ${{ env.CHROME_PATH }}
-          HEADLESS: ${{ github.event.inputs.HEADLESS || 'true' }}
-          API_BASE_URL: ${{ secrets.API_BASE_URL || '' }}
-          API_TOKEN: ${{ secrets.API_TOKEN || '' }}
-        run: |
-          node playwright-multi-context.js
+      name: Playwright multi-context with Tor (Dockerized)
 
-      - name: Stop tor-ip-changer containers (cleanup)
-        if: always()
+on:
+  workflow_dispatch:
+    inputs:
+      CONTEXTS:
+        description: 'Kaç context açılacak'
+        required: false
+        default: '3'
+      HEADLESS:
+        description: 'Tarayıcı headless mi açılsın?'
+        required: false
+        default: 'true'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run in Docker (Node + Playwright)
         run: |
-          set -e || true
-          BASE=${{ env.TOR_BASE_PORT }}
           CONTEXTS=${{ github.event.inputs.CONTEXTS || 3 }}
-          for i in $(seq 0 $((CONTEXTS-1))); do
-            HOST_SOCK=$((BASE + i))
-            NAME="torch_${HOST_SOCK}"
-            echo "Stopping $NAME if exists"
-            docker ps -q --filter "name=$NAME" | grep -q . && docker stop $NAME || true
-          done
+          HEADLESS=${{ github.event.inputs.HEADLESS || 'true' }}
+          
+          # Docker image: Node + Playwright preinstalled
+          docker run --rm -v $PWD:/workspace -w /workspace \
+            -e CONTEXTS="$CONTEXTS" \
+            -e HEADLESS="$HEADLESS" \
+            -e TOR_BASE_PORT=9050 \
+            node:20-bullseye bash -c "\
+              npm i --no-audit --no-fund playwright-core && \
+              node playwright-multi-context.js \
+            "
